@@ -45,6 +45,35 @@ function saveDay(date: string, map: Map<string, SeenEntry>) {
   fs.writeFileSync(dataFile(date), JSON.stringify(obj), 'utf8');
 }
 
+// ─── Persistent service→SIM map ──────────────────────────────────────────────
+// Maps service_id → { sim_number, ip, last_seen } so offline services can
+// still show their last known SIM on the Customers page.
+
+const SERVICE_SIMS_FILE = path.join(DATA_DIR, 'service-sims.json');
+
+function loadServiceSims(): Record<string, { sim_number: string; ip: string | null; last_seen: string }> {
+  try {
+    if (fs.existsSync(SERVICE_SIMS_FILE)) return JSON.parse(fs.readFileSync(SERVICE_SIMS_FILE, 'utf8'));
+  } catch { /* ignore */ }
+  return {};
+}
+
+function recordServiceSims(sessions: Array<{
+  service_id: number; sim_number: string; ip: string | null;
+}>) {
+  const map = loadServiceSims();
+  const now = new Date().toISOString();
+  for (const s of sessions) {
+    if (!s.service_id || !s.sim_number) continue;
+    map[String(s.service_id)] = { sim_number: s.sim_number, ip: s.ip, last_seen: now };
+  }
+  fs.writeFileSync(SERVICE_SIMS_FILE, JSON.stringify(map), 'utf8');
+}
+
+export function getServiceSims() {
+  return loadServiceSims();
+}
+
 function recordSims(sims: Array<{
   sim_number: string; customer_id: number; customer_name: string | null;
   download_bytes: number; upload_bytes: number;
@@ -130,6 +159,7 @@ router.get('/online/lte-sims', async (_req: Request, res: Response) => {
       if (!existing || new Date(session.start_session) > new Date(existing.start_session)) {
         simMap.set(mac, {
           sim_number: mac,
+          service_id: session.service_id ? Number(session.service_id) : null,
           customer_id: session.customer_id,
           customer_name: customerMap.get(Number(session.customer_id)) || null,
           ip: session.ipv4 || null,
@@ -156,6 +186,13 @@ router.get('/online/lte-sims', async (_req: Request, res: Response) => {
       download_bytes: s.download_bytes,
       upload_bytes: s.upload_bytes,
     })));
+
+    // Persist service_id → SIM mapping so offline services retain last known SIM
+    recordServiceSims(
+      sims
+        .filter((s) => s.service_id)
+        .map((s) => ({ service_id: s.service_id, sim_number: s.sim_number, ip: s.ip }))
+    );
 
     res.json({ total: sims.length, sims });
   } catch (err: any) {

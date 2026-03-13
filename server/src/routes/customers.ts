@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
 import { splynx } from '../lib/splynx';
+import { getServiceSims } from './sessions';
 
 const router = Router();
 
@@ -32,23 +33,44 @@ router.get('/lte-summary', async (_req: Request, res: Response) => {
       if (s.login) sessionByLogin.set(String(s.login).toLowerCase(), s);
     }
 
-    // 3. Build last-known SIM map from daily tracker files (keyed by sim_number)
-    //    We'll use this to fill in offline services where we can match login→sim
+    // 3. Load last-known SIM per service_id from the persistent service-sims map.
+    //    This is updated every time /online/lte-sims is polled, so offline services
+    //    retain the SIM from their most recent live session.
+    const serviceSims = getServiceSims(); // keyed by service_id (string)
+
+    // Build two indexes from the daily tracker files (last 30 days):
+    //   sim → { last_seen, peak_dl, peak_ul }   — for byte/date enrichment
+    //   customer_id → most-recent entry          — fallback SIM when service-sims has no entry
     const lastKnownBySim = new Map<string, { last_seen: string; peak_dl: number; peak_ul: number }>();
+    const lastKnownByCustomer = new Map<number, { sim_number: string; last_seen: string; peak_dl: number; peak_ul: number }>();
     if (fs.existsSync(DATA_DIR)) {
       const files = fs.readdirSync(DATA_DIR)
         .filter(f => f.startsWith('sessions-') && f.endsWith('.json'))
         .sort().reverse();
-      for (const file of files.slice(0, 30)) { // last 30 days is enough
+      for (const file of files.slice(0, 30)) {
         try {
           const raw = JSON.parse(fs.readFileSync(path.join(DATA_DIR, file), 'utf8'));
           for (const entry of Object.values(raw) as any[]) {
-            if (entry.sim_number && !lastKnownBySim.has(entry.sim_number)) {
+            if (!entry.sim_number) continue;
+            if (!lastKnownBySim.has(entry.sim_number)) {
               lastKnownBySim.set(entry.sim_number, {
                 last_seen: entry.last_seen,
                 peak_dl: entry.peak_download_bytes,
                 peak_ul: entry.peak_upload_bytes,
               });
+            }
+            // Keep the most-recent SIM seen for this customer
+            const cid = Number(entry.customer_id);
+            if (cid) {
+              const prev = lastKnownByCustomer.get(cid);
+              if (!prev || entry.last_seen > prev.last_seen) {
+                lastKnownByCustomer.set(cid, {
+                  sim_number: entry.sim_number,
+                  last_seen: entry.last_seen,
+                  peak_dl: entry.peak_download_bytes,
+                  peak_ul: entry.peak_upload_bytes,
+                });
+              }
             }
           }
         } catch { /* skip */ }
@@ -100,11 +122,14 @@ router.get('/lte-summary', async (_req: Request, res: Response) => {
             upload_bytes: Number(activeSession.out_bytes) || 0,
           });
         } else {
-          // Offline — try to find last known SIM from tracker via login match
-          // Sessions store login, tracker stores sim_number; bridge via sessionByLogin history
-          // Best effort: check if tracker has an entry matching this service's MAC field
-          const trackerSim = svc.mac || null; // service may have MAC pre-configured
-          const tracker = trackerSim ? lastKnownBySim.get(trackerSim) : null;
+          // Offline — three-tier SIM lookup (same logic as history import: NAS 21/22 sessions only):
+          //   1. service-sims.json  — updated every live-session poll (most specific: per service_id)
+          //   2. daily tracker by customer_id — last SIM seen for this customer across all their sessions
+          const serviceSim = serviceSims[String(serviceId)] || null;
+          const customerTracker = lastKnownByCustomer.get(Number(customerId)) || null;
+
+          const simNumber = serviceSim?.sim_number || customerTracker?.sim_number || null;
+          const tracker = simNumber ? lastKnownBySim.get(simNumber) : null;
 
           rows.push({
             customer_id: customerId,
@@ -113,12 +138,12 @@ router.get('/lte-summary', async (_req: Request, res: Response) => {
             service_login: svc.login,
             description: svc.description || 'Cloud-LTE',
             status: svc.status === 'active' ? 'active' : 'offline',
-            sim_number: trackerSim || null,
-            last_seen: tracker?.last_seen || null,
-            ip: svc.ipv4 || null,
+            sim_number: simNumber,
+            last_seen: serviceSim?.last_seen || customerTracker?.last_seen || null,
+            ip: serviceSim?.ip || null,
             router_name: null,
-            download_bytes: tracker?.peak_dl || 0,
-            upload_bytes: tracker?.peak_ul || 0,
+            download_bytes: tracker?.peak_dl || customerTracker?.peak_dl || 0,
+            upload_bytes: tracker?.peak_ul || customerTracker?.peak_ul || 0,
           });
         }
       }
