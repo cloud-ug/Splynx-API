@@ -8,11 +8,12 @@ const router = Router();
 const DATA_DIR = path.join(__dirname, '../../data');
 
 // ─── GET /api/customers/lte-summary ──────────────────────────────────────────
-// Returns every customer with their most recent LTE SIM and online status.
-// Online customers come from live sessions; offline from the daily tracker files.
+// Returns all Cloud-LTE services across all customers, each with its most
+// recent SIM (MAC) pulled from the active session or daily tracker.
+// One row per service — customers with multiple SIMs appear multiple times.
 router.get('/lte-summary', async (_req: Request, res: Response) => {
   try {
-    // 1. Fetch all customers + active LTE sessions in parallel
+    // 1. Fetch customers + active sessions in parallel
     const [customerData, sessionData] = await Promise.all([
       splynx('get', '/admin/customers/customer', undefined, { itemsPerPage: 500 }),
       splynx('get', '/admin/customers/customers-online', undefined, { itemsPerPage: 1000 }),
@@ -21,96 +22,112 @@ router.get('/lte-summary', async (_req: Request, res: Response) => {
     const customers: any[] = Array.isArray(customerData) ? customerData : (customerData.items || []);
     const sessions: any[] = Array.isArray(sessionData) ? sessionData : (sessionData.items || []);
 
-    // 2. Build map of currently online LTE sessions keyed by customer_id
-    const onlineMap = new Map<number, any>();
+    // 2. Index active LTE sessions by service_id and by login
+    const sessionByServiceId = new Map<number, any>();
+    const sessionByLogin = new Map<string, any>();
     for (const s of sessions) {
       if (s.type !== 'radius' || !s.mac) continue;
-      const cid = Number(s.customer_id);
-      const existing = onlineMap.get(cid);
-      if (!existing || new Date(s.start_session) > new Date(existing.start_session)) {
-        onlineMap.set(cid, s);
-      }
+      const sid = Number(s.service_id);
+      if (sid && !sessionByServiceId.has(sid)) sessionByServiceId.set(sid, s);
+      if (s.login) sessionByLogin.set(String(s.login).toLowerCase(), s);
     }
 
-    // 3. Build map of last known SIM per customer from daily tracker files (newest first)
-    const lastKnownMap = new Map<number, { sim_number: string; last_seen: string; peak_download_bytes: number; peak_upload_bytes: number }>();
+    // 3. Build last-known SIM map from daily tracker files (keyed by sim_number)
+    //    We'll use this to fill in offline services where we can match login→sim
+    const lastKnownBySim = new Map<string, { last_seen: string; peak_dl: number; peak_ul: number }>();
     if (fs.existsSync(DATA_DIR)) {
       const files = fs.readdirSync(DATA_DIR)
         .filter(f => f.startsWith('sessions-') && f.endsWith('.json'))
-        .sort().reverse(); // newest first
-
-      for (const file of files) {
+        .sort().reverse();
+      for (const file of files.slice(0, 30)) { // last 30 days is enough
         try {
           const raw = JSON.parse(fs.readFileSync(path.join(DATA_DIR, file), 'utf8'));
           for (const entry of Object.values(raw) as any[]) {
-            const cid = Number(entry.customer_id);
-            if (cid && !lastKnownMap.has(cid)) {
-              lastKnownMap.set(cid, {
-                sim_number: entry.sim_number,
+            if (entry.sim_number && !lastKnownBySim.has(entry.sim_number)) {
+              lastKnownBySim.set(entry.sim_number, {
                 last_seen: entry.last_seen,
-                peak_download_bytes: entry.peak_download_bytes,
-                peak_upload_bytes: entry.peak_upload_bytes,
+                peak_dl: entry.peak_download_bytes,
+                peak_ul: entry.peak_upload_bytes,
               });
             }
           }
-        } catch { /* skip corrupt files */ }
-
-        // Stop once we have a last-known entry for every customer
-        if (lastKnownMap.size >= customers.length) break;
+        } catch { /* skip */ }
       }
     }
 
-    // 4. Merge into customer summary
-    const summary = customers.map(c => {
-      const cid = Number(c.id);
-      const online = onlineMap.get(cid);
-      const lastKnown = lastKnownMap.get(cid);
-
-      if (online) {
-        return {
-          customer_id: cid,
-          customer_name: c.name,
-          sim_number: online.mac,
-          is_online: true,
-          last_seen: online.start_session,
-          download_bytes: Number(online.in_bytes) || 0,
-          upload_bytes: Number(online.out_bytes) || 0,
-          ip: online.ipv4 || null,
-          router_name: online.nas_identifier || null,
-        };
+    // 4. Fetch internet services for all customers in parallel (batched)
+    const BATCH = 10;
+    const allServices: any[] = [];
+    for (let i = 0; i < customers.length; i += BATCH) {
+      const batch = customers.slice(i, i + BATCH);
+      const results = await Promise.allSettled(
+        batch.map(c =>
+          splynx('get', `/admin/customers/customer/${c.id}/internet-services`)
+            .then((d: any) => ({ customerId: c.id, customerName: c.name, services: Array.isArray(d) ? d : [] }))
+        )
+      );
+      for (const r of results) {
+        if (r.status === 'fulfilled') allServices.push(r.value);
       }
+    }
 
-      if (lastKnown) {
-        return {
-          customer_id: cid,
-          customer_name: c.name,
-          sim_number: lastKnown.sim_number,
-          is_online: false,
-          last_seen: lastKnown.last_seen,
-          download_bytes: lastKnown.peak_download_bytes,
-          upload_bytes: lastKnown.peak_upload_bytes,
-          ip: null,
-          router_name: null,
-        };
+    // 5. Build rows — one per Cloud-LTE service
+    const LTE_TARIFF_ID = 37;
+    const rows: any[] = [];
+
+    for (const { customerId, customerName, services } of allServices) {
+      const lteServices = services.filter((s: any) => Number(s.tariff_id) === LTE_TARIFF_ID);
+      for (const svc of lteServices) {
+        const serviceId = Number(svc.id);
+        const login = String(svc.login || '').toLowerCase();
+
+        // Try to find active session
+        const activeSession = sessionByServiceId.get(serviceId) || sessionByLogin.get(login);
+
+        if (activeSession) {
+          rows.push({
+            customer_id: customerId,
+            customer_name: customerName,
+            service_id: serviceId,
+            service_login: svc.login,
+            description: svc.description || 'Cloud-LTE',
+            status: 'online',
+            sim_number: activeSession.mac,
+            last_seen: activeSession.start_session,
+            ip: activeSession.ipv4 || null,
+            router_name: activeSession.nas_identifier || null,
+            download_bytes: Number(activeSession.in_bytes) || 0,
+            upload_bytes: Number(activeSession.out_bytes) || 0,
+          });
+        } else {
+          // Offline — try to find last known SIM from tracker via login match
+          // Sessions store login, tracker stores sim_number; bridge via sessionByLogin history
+          // Best effort: check if tracker has an entry matching this service's MAC field
+          const trackerSim = svc.mac || null; // service may have MAC pre-configured
+          const tracker = trackerSim ? lastKnownBySim.get(trackerSim) : null;
+
+          rows.push({
+            customer_id: customerId,
+            customer_name: customerName,
+            service_id: serviceId,
+            service_login: svc.login,
+            description: svc.description || 'Cloud-LTE',
+            status: svc.status === 'active' ? 'active' : 'offline',
+            sim_number: trackerSim || null,
+            last_seen: tracker?.last_seen || null,
+            ip: svc.ipv4 || null,
+            router_name: null,
+            download_bytes: tracker?.peak_dl || 0,
+            upload_bytes: tracker?.peak_ul || 0,
+          });
+        }
       }
+    }
 
-      // No LTE session ever recorded
-      return {
-        customer_id: cid,
-        customer_name: c.name,
-        sim_number: null,
-        is_online: false,
-        last_seen: null,
-        download_bytes: 0,
-        upload_bytes: 0,
-        ip: null,
-        router_name: null,
-      };
-    });
-
-    // Sort: online first, then by last_seen desc
-    summary.sort((a, b) => {
-      if (a.is_online !== b.is_online) return a.is_online ? -1 : 1;
+    // Sort: online first, then active, then by last_seen desc
+    rows.sort((a, b) => {
+      const order: Record<string, number> = { online: 0, active: 1, offline: 2 };
+      if (order[a.status] !== order[b.status]) return order[a.status] - order[b.status];
       if (!a.last_seen && !b.last_seen) return 0;
       if (!a.last_seen) return 1;
       if (!b.last_seen) return -1;
@@ -118,9 +135,10 @@ router.get('/lte-summary', async (_req: Request, res: Response) => {
     });
 
     res.json({
-      total: summary.length,
-      online: summary.filter(s => s.is_online).length,
-      customers: summary,
+      total: rows.length,
+      online: rows.filter(r => r.status === 'online').length,
+      active: rows.filter(r => r.status === 'active').length,
+      services: rows,
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
