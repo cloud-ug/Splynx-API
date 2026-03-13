@@ -19,11 +19,12 @@ import { splynx } from '../lib/splynx';
 
 const DATA_DIR = path.join(__dirname, '../../data');
 const PROGRESS_FILE = path.join(DATA_DIR, 'import-progress.json');
-const PAGE_SIZE = 5;          // small — Splynx times out on larger pages for big customers
-const PAGE_DELAY_MS = 800;    // pause between pages to avoid hammering the API
+const PAGE_SIZE = 25;              // balance between speed and Splynx timeout risk
+const PAGE_DELAY_MS = 500;         // pause between pages to avoid hammering the API
 const CUSTOMER_DELAY_MS = 500;
-const REQUEST_TIMEOUT_MS = 30_000;
-const MAX_RETRIES = 3;
+const REQUEST_TIMEOUT_MS = 45_000;
+const MAX_RETRIES = 2;
+const MAX_CUSTOMER_MS = 3 * 60 * 1000; // skip customer after 3 minutes total
 
 // LTE NAS device IDs (MTN-LTE-# and MTN-LTE-NEW)
 const LTE_NAS_IDS = new Set([21, 22]);
@@ -149,7 +150,8 @@ async function fetchPage(customerId: number, page: number): Promise<any[] | null
       const data = await splynx('get', `/admin/customers/customer/${customerId}/statistics`, undefined, {
         itemsPerPage: PAGE_SIZE,
         page,
-      });
+        'sort[id]': 'desc',  // newest first — lets us stop early once we hit old data
+      }, REQUEST_TIMEOUT_MS);
       return Array.isArray(data) ? data : (data.items || data.data || []);
     } catch (err: any) {
       const isLast = attempt === MAX_RETRIES;
@@ -171,8 +173,14 @@ async function processCustomer(
   let imported = 0;
   let page = 1;
   let done = false;
+  const customerStart = Date.now();
 
   while (!done && running) {
+    // Per-customer timeout — skip if taking too long
+    if (Date.now() - customerStart > MAX_CUSTOMER_MS) {
+      console.log(`[history-import]   Customer ${customerId} hit 3-minute limit after ${page} pages — skipping`);
+      return { imported, skipped: imported === 0, daysAdded };
+    }
     const items = await fetchPage(customerId, page);
 
     if (items === null) {
@@ -181,8 +189,6 @@ async function processCustomer(
     }
 
     if (items.length === 0) break;
-
-    let hitOldData = false;
 
     for (const stat of items) {
       // Only LTE sessions: mac must be set, nas_id must be LTE
@@ -198,12 +204,11 @@ async function processCustomer(
 
       if (!endIso || !startIso) continue;
 
-      // Stop if we've gone past our date range (records come in ascending order)
-      // We check both start and end — if end is before fromDate, skip early
-      // Note: stop pagination only if ALL remaining records would be before fromDate
+      // Records come newest first — once end_date is before our cutoff, all
+      // subsequent records will also be old, so we can stop immediately.
       if (stat.end_date < fromDate) {
-        hitOldData = true;
-        continue;
+        done = true;
+        break;
       }
 
       const day = mergeStatIntoDay({
@@ -218,15 +223,6 @@ async function processCustomer(
 
       daysAdded.add(day);
       imported++;
-    }
-
-    // If we only got old data on this page, we've likely passed our window
-    // (records are in ascending date order, older first)
-    if (hitOldData && items.length === PAGE_SIZE) {
-      // Keep paginating — there may be newer records interleaved
-      // Only stop when all items on the page were old
-      const allOld = items.every(s => !s.end_date || s.end_date < fromDate);
-      if (allOld) { done = true; break; }
     }
 
     if (items.length < PAGE_SIZE) break; // Last page

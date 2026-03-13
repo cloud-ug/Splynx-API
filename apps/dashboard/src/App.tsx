@@ -3,6 +3,7 @@ import Layout from './components/Layout';
 import LteSessionsPage from './pages/sessions/LteSessionsPage';
 import ReportsPage from './pages/reports/ReportsPage';
 import SettingsPage from './pages/settings/SettingsPage';
+import CustomersPage from './pages/customers/CustomersPage';
 
 function PlaceholderPage({ title }: { title: string }) {
   return (
@@ -20,7 +21,7 @@ export default function App() {
         <Route path="/" element={<Layout />}>
           <Route index element={<Navigate to="/sessions" replace />} />
           <Route path="sessions" element={<LteSessionsPage />} />
-          <Route path="customers" element={<PlaceholderPage title="Customers" />} />
+          <Route path="customers" element={<CustomersPage />} />
           <Route path="reports" element={<ReportsPage />} />
           <Route path="settings" element={<SettingsPage />} />
         </Route>

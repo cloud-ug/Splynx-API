@@ -45,7 +45,8 @@ export async function splynx(
   method: 'get' | 'post' | 'put' | 'patch' | 'delete',
   path: string,
   data?: Record<string, unknown>,
-  params?: Record<string, unknown>
+  params?: Record<string, unknown>,
+  timeoutMs?: number
 ) {
   const token = await getToken();
   const res = await getClient().request({
@@ -54,6 +55,7 @@ export async function splynx(
     data,
     params,
     headers: { Authorization: `Splynx-EA (access_token=${token})` },
+    ...(timeoutMs ? { timeout: timeoutMs } : {}),
   });
   return res.data;
 }
