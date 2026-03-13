@@ -1,13 +1,13 @@
 import axios, { AxiosInstance } from 'axios';
 
 let client: AxiosInstance | null = null;
-let tokenExpiry = 0;
 let cachedToken = '';
+let tokenExpiry = 0;
 
 function getClient(): AxiosInstance {
   if (!client) {
     client = axios.create({
-      baseURL: `${process.env.SPLYNX_URL}/api/v2`,
+      baseURL: `${process.env.SPLYNX_URL}/api/2.0`,
       timeout: 15000,
     });
   }
@@ -17,16 +17,28 @@ function getClient(): AxiosInstance {
 async function getToken(): Promise<string> {
   if (cachedToken && Date.now() < tokenExpiry) return cachedToken;
 
-  const res = await getClient().post('/auth/tokens', {
-    auth_type: 'admin',
-    login: process.env.SPLYNX_LOGIN,
-    password: process.env.SPLYNX_PASSWORD,
-  });
+  const login = process.env.SPLYNX_LOGIN;
+  const password = process.env.SPLYNX_PASSWORD;
 
-  cachedToken = res.data.access_token;
-  // tokens last 1 hour — refresh 5 min early
-  tokenExpiry = Date.now() + 55 * 60 * 1000;
-  return cachedToken;
+  if (!login || !password) {
+    throw new Error('SPLYNX_LOGIN and SPLYNX_PASSWORD must be set in .env');
+  }
+
+  try {
+    const res = await getClient().post('/admin/auth/tokens', {
+      auth_type: 'admin',
+      login,
+      password,
+    });
+
+    console.log('Splynx auth success');
+    cachedToken = res.data.access_token;
+    tokenExpiry = Date.now() + 25 * 60 * 1000; // tokens expire in 30min, refresh at 25
+    return cachedToken;
+  } catch (err: any) {
+    console.error('Splynx auth failed:', err.response?.status, JSON.stringify(err.response?.data));
+    throw err;
+  }
 }
 
 export async function splynx(
@@ -41,7 +53,7 @@ export async function splynx(
     url: path,
     data,
     params,
-    headers: { Authorization: `Bearer ${token}` },
+    headers: { Authorization: `Splynx-EA (access_token=${token})` },
   });
   return res.data;
 }

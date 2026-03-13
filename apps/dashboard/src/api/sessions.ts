@@ -23,6 +23,38 @@ export async function getActiveLteSims(): Promise<LteSimsResponse> {
   return res.data;
 }
 
+export async function getRecentLteSims(): Promise<LteSimsResponse> {
+  const res = await api.get('/sessions/recent');
+  return res.data;
+}
+
+export interface DailySimEntry {
+  sim_number: string;
+  customer_id: number;
+  customer_name: string | null;
+  first_seen: string;
+  last_seen: string;
+  peak_download_bytes: number;
+  peak_upload_bytes: number;
+}
+
+export interface TodayReportResponse {
+  date: string;
+  total: number;
+  currently_online: number;
+  sims: DailySimEntry[];
+}
+
+export async function getDayReport(date?: string): Promise<TodayReportResponse> {
+  const res = await api.get('/sessions/report/day', { params: date ? { date } : {} });
+  return res.data;
+}
+
+export async function getReportDates(): Promise<{ dates: string[] }> {
+  const res = await api.get('/sessions/report/dates');
+  return res.data;
+}
+
 export async function getSessionHistory(params?: {
   mac?: string;
   customer_id?: string;

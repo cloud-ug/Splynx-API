@@ -3,3 +3,5 @@ dist/
 .env
 *.tsbuildinfo
 .DS_Store
+server/data/
+api-1.json

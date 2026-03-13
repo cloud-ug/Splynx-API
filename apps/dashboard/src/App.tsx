@@ -1,6 +1,8 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import Layout from './components/Layout';
 import LteSessionsPage from './pages/sessions/LteSessionsPage';
+import ReportsPage from './pages/reports/ReportsPage';
+import SettingsPage from './pages/settings/SettingsPage';
 
 function PlaceholderPage({ title }: { title: string }) {
   return (
@@ -19,8 +21,8 @@ export default function App() {
           <Route index element={<Navigate to="/sessions" replace />} />
           <Route path="sessions" element={<LteSessionsPage />} />
           <Route path="customers" element={<PlaceholderPage title="Customers" />} />
-          <Route path="reports" element={<PlaceholderPage title="Reports" />} />
-          <Route path="settings" element={<PlaceholderPage title="Settings" />} />
+          <Route path="reports" element={<ReportsPage />} />
+          <Route path="settings" element={<SettingsPage />} />
         </Route>
       </Routes>
     </BrowserRouter>

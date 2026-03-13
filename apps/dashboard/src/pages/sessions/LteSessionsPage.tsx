@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { getActiveLteSims, SimSession } from '../../api/sessions';
-import { Radio, RefreshCw, Download, Search, Wifi, WifiOff } from 'lucide-react';
+import { getActiveLteSims, getRecentLteSims, SimSession } from '../../api/sessions';
+import { Radio, RefreshCw, Download, Search, Wifi, WifiOff, Clock } from 'lucide-react';
 import clsx from 'clsx';
 
 function formatBytes(bytes: number) {
@@ -13,21 +13,35 @@ function formatBytes(bytes: number) {
 }
 
 function formatDuration(started: string) {
-  const diff = Date.now() - new Date(started).getTime();
+  // Splynx returns "YYYY-MM-DD HH:MM:SS" — replace space with T for reliable parsing
+  const diff = Date.now() - new Date(started.replace(' ', 'T')).getTime();
   const h = Math.floor(diff / 3_600_000);
   const m = Math.floor((diff % 3_600_000) / 60_000);
   if (h > 0) return `${h}h ${m}m`;
   return `${m}m`;
 }
 
+type Tab = 'live' | 'recent';
+
 export default function LteSessionsPage() {
   const [search, setSearch] = useState('');
+  const [tab, setTab] = useState<Tab>('live');
 
-  const { data, isLoading, isError, refetch, isFetching } = useQuery({
+  const liveQuery = useQuery({
     queryKey: ['lte-sims'],
     queryFn: getActiveLteSims,
-    refetchInterval: 60_000, // auto-refresh every minute
+    refetchInterval: 60_000,
   });
+
+  const recentQuery = useQuery({
+    queryKey: ['lte-sims-recent'],
+    queryFn: getRecentLteSims,
+    refetchInterval: 60_000,
+    enabled: tab === 'recent',
+  });
+
+  const { data, isLoading, isError, refetch, isFetching } =
+    tab === 'live' ? liveQuery : recentQuery;
 
   const filtered = (data?.sims ?? []).filter((s) => {
     const q = search.toLowerCase();
@@ -91,6 +105,34 @@ export default function LteSessionsPage() {
             Export CSV
           </button>
         </div>
+      </div>
+
+      {/* Tabs */}
+      <div className="flex gap-2 mb-6 border-b border-gray-200">
+        <button
+          onClick={() => setTab('live')}
+          className={clsx(
+            'flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors',
+            tab === 'live'
+              ? 'border-blue-600 text-blue-600'
+              : 'border-transparent text-gray-500 hover:text-gray-700'
+          )}
+        >
+          <Wifi size={15} />
+          Live Sessions
+        </button>
+        <button
+          onClick={() => setTab('recent')}
+          className={clsx(
+            'flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors',
+            tab === 'recent'
+              ? 'border-blue-600 text-blue-600'
+              : 'border-transparent text-gray-500 hover:text-gray-700'
+          )}
+        >
+          <Clock size={15} />
+          Last 24 Hours
+        </button>
       </div>
 
       {/* Stats */}
@@ -172,7 +214,9 @@ export default function LteSessionsPage() {
 
       {!isLoading && !isError && (
         <p className="text-xs text-gray-400 mt-3 text-right">
-          Auto-refreshes every 60 seconds · Showing {filtered.length} of {data?.total ?? 0} SIMs
+          Auto-refreshes every 60 seconds ·{' '}
+          {tab === 'recent' ? 'Sessions started in the last 24h · ' : ''}
+          Showing {filtered.length} of {data?.total ?? 0} SIMs
         </p>
       )}
     </div>
