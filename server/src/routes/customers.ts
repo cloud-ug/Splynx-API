@@ -93,13 +93,11 @@ router.get('/lte-summary', async (_req: Request, res: Response) => {
       }
     }
 
-    // 5. Build rows — one per Cloud-LTE service
-    const LTE_TARIFF_ID = 37;
+    // 5. Build rows — one per internet service (all tariffs)
     const rows: any[] = [];
 
     for (const { customerId, customerName, services } of allServices) {
-      const lteServices = services.filter((s: any) => Number(s.tariff_id) === LTE_TARIFF_ID);
-      for (const svc of lteServices) {
+      for (const svc of services) {
         const serviceId = Number(svc.id);
         const login = String(svc.login || '').toLowerCase();
 
@@ -112,9 +110,10 @@ router.get('/lte-summary', async (_req: Request, res: Response) => {
             customer_name: customerName,
             service_id: serviceId,
             service_login: svc.login,
-            description: svc.description || 'Cloud-LTE',
+            tariff_id: svc.tariff_id,
+            description: svc.description || svc.login,
             status: 'online',
-            sim_number: activeSession.mac,
+            sim_number: activeSession.mac || null,
             last_seen: activeSession.start_session,
             ip: activeSession.ipv4 || null,
             router_name: activeSession.nas_identifier || null,
@@ -136,11 +135,12 @@ router.get('/lte-summary', async (_req: Request, res: Response) => {
             customer_name: customerName,
             service_id: serviceId,
             service_login: svc.login,
-            description: svc.description || 'Cloud-LTE',
+            tariff_id: svc.tariff_id,
+            description: svc.description || svc.login,
             status: svc.status === 'active' ? 'active' : 'offline',
             sim_number: simNumber,
             last_seen: serviceSim?.last_seen || customerTracker?.last_seen || null,
-            ip: serviceSim?.ip || null,
+            ip: serviceSim?.ip || svc.ipv4 || null,
             router_name: null,
             download_bytes: tracker?.peak_dl || customerTracker?.peak_dl || 0,
             upload_bytes: tracker?.peak_ul || customerTracker?.peak_ul || 0,

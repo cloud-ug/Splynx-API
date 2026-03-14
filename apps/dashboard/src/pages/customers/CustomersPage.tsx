@@ -4,11 +4,14 @@ import { Users, Search, RefreshCw, Wifi, WifiOff, Download } from 'lucide-react'
 import clsx from 'clsx';
 import api from '../../api/client';
 
+const LTE_TARIFF_ID = 37;
+
 interface ServiceRow {
   customer_id: number;
   customer_name: string;
   service_id: number;
   service_login: string;
+  tariff_id: number;
   description: string;
   status: 'online' | 'active' | 'offline';
   sim_number: string | null;
@@ -19,14 +22,14 @@ interface ServiceRow {
   upload_bytes: number;
 }
 
-interface LteSummaryResponse {
+interface SummaryResponse {
   total: number;
   online: number;
   active: number;
   services: ServiceRow[];
 }
 
-async function getLteSummary(): Promise<LteSummaryResponse> {
+async function getSummary(): Promise<SummaryResponse> {
   const r = await api.get('/customers/lte-summary');
   return r.data;
 }
@@ -55,18 +58,19 @@ function formatLastSeen(iso: string | null) {
 
 export default function CustomersPage() {
   const [search, setSearch] = useState('');
-  const [filter, setFilter] = useState<'all' | 'online' | 'active' | 'offline'>('all');
+  const [filter, setFilter] = useState<'all' | 'online' | 'active' | 'offline' | 'lte'>('all');
 
   const query = useQuery({
     queryKey: ['lte-summary'],
-    queryFn: getLteSummary,
+    queryFn: getSummary,
     refetchInterval: 60_000,
   });
 
   const { data, isLoading, isError, refetch, isFetching } = query;
 
   const filtered = (data?.services ?? []).filter(s => {
-    if (filter !== 'all' && s.status !== filter) return false;
+    if (filter === 'lte' && s.tariff_id !== LTE_TARIFF_ID) return false;
+    if (filter !== 'all' && filter !== 'lte' && s.status !== filter) return false;
     if (search) {
       const q = search.toLowerCase();
       return (
@@ -107,10 +111,10 @@ export default function CustomersPage() {
         <div>
           <h1 className="text-2xl font-bold flex items-center gap-2">
             <Users className="text-blue-600" size={24} />
-            LTE Services
+            Internet Services
           </h1>
           <p className="text-gray-500 text-sm mt-1">
-            Each Cloud-LTE service with its most recent SIM and session status
+            All internet services — use the LTE filter to show Cloud-LTE SIM services only
           </p>
         </div>
         <div className="flex gap-2">
@@ -144,11 +148,11 @@ export default function CustomersPage() {
             className="w-full pl-9 pr-4 py-2.5 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
         </div>
         <div className="flex gap-1 bg-gray-100 rounded-lg p-1">
-          {(['all', 'online', 'active', 'offline'] as const).map(f => (
+          {(['all', 'lte', 'online', 'active', 'offline'] as const).map(f => (
             <button key={f} onClick={() => setFilter(f)}
               className={clsx('px-3 py-1.5 text-xs font-medium rounded-md transition-colors',
                 filter === f ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700')}>
-              {f.charAt(0).toUpperCase() + f.slice(1)}
+              {f === 'lte' ? 'LTE Only' : f.charAt(0).toUpperCase() + f.slice(1)}
             </button>
           ))}
         </div>
@@ -183,9 +187,16 @@ export default function CustomersPage() {
                     <p className="font-medium text-gray-800 text-sm">{s.customer_name}</p>
                     <p className="text-gray-400 text-xs">{s.description}</p>
                   </td>
-                  <td className="px-4 py-3 font-mono text-xs text-gray-600">{s.service_login}</td>
+                  <td className="px-4 py-3 font-mono text-xs text-gray-600">
+                    <p>{s.service_login}</p>
+                    {s.tariff_id === LTE_TARIFF_ID && (
+                      <span className="text-blue-500 text-xs">Cloud-LTE</span>
+                    )}
+                  </td>
                   <td className="px-4 py-3 font-mono text-xs text-gray-700">
-                    {s.sim_number ?? <span className="text-gray-400 italic">No SIM</span>}
+                    {s.sim_number ?? (s.tariff_id === LTE_TARIFF_ID
+                      ? <span className="text-gray-400 italic">No SIM</span>
+                      : <span className="text-gray-300">—</span>)}
                   </td>
                   <td className="px-4 py-3">
                     <StatusBadge status={s.status} />
