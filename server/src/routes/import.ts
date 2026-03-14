@@ -105,7 +105,7 @@ router.post('/rebuild-sims', async (_req: Request, res: Response) => {
             for (const stat of items) {
               // Stop if we've gone past the 90-day cutoff
               if (stat.end_date && stat.end_date < cutoffDate) { pastCutoff = true; break; }
-              if (!stat.mac || !stat.service_id || !LTE_NAS_IDS.has(Number(stat.nas_id))) continue;
+              if (!stat.mac || !stat.service_id) continue; // any session with a MAC is SIM-based (misprovision can put SIM on any NAS)
 
               const key = String(stat.service_id);
               if (!pending.has(key)) continue; // already found or not our service
