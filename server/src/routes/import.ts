@@ -62,8 +62,9 @@ router.post('/csv', upload.single('file'), (req: Request, res: Response) => {
 });
 
 // POST /api/import/rebuild-sims
-// Fast scan: fetches only the most recent page of statistics per customer to
-// get the last known MAC per service_id. Completes in ~2–5 minutes vs 2 hours.
+// Fetches each customer's internet services, then queries the last session
+// for each LTE service by login — one targeted request per service.
+// Completes in a few minutes and correctly handles multi-service customers.
 router.post('/rebuild-sims', async (_req: Request, res: Response) => {
   res.json({ ok: true, message: 'Rebuilding service-sims in background…' });
 
@@ -72,33 +73,45 @@ router.post('/rebuild-sims', async (_req: Request, res: Response) => {
       const customerData = await splynx('get', '/admin/customers/customer', undefined, { itemsPerPage: 500 });
       const customers: any[] = Array.isArray(customerData) ? customerData : (customerData.items || []);
 
-      // Load existing map so we don't lose entries already there
       let map: Record<string, { sim_number: string; ip: string | null; last_seen: string }> = {};
       try { if (fs.existsSync(SERVICE_SIMS_FILE)) map = JSON.parse(fs.readFileSync(SERVICE_SIMS_FILE, 'utf8')); } catch {}
 
       let updated = 0;
+
       for (const customer of customers) {
         try {
-          // Fetch only the first page (newest records)
-          const data = await splynx('get', `/admin/customers/customer/${customer.id}/statistics`, undefined, {
-            itemsPerPage: 50, page: 1, 'sort[id]': 'desc',
-          }, 20_000);
-          const items: any[] = Array.isArray(data) ? data : (data.items || data.data || []);
+          // Get internet services for this customer
+          const svcData = await splynx('get', `/admin/customers/customer/${customer.id}/internet-services`, undefined, undefined, 15_000);
+          const services: any[] = Array.isArray(svcData) ? svcData : [];
 
-          for (const stat of items) {
-            if (!stat.mac || !stat.service_id || !LTE_NAS_IDS.has(Number(stat.nas_id))) continue;
-            const key = String(stat.service_id);
-            const endIso = stat.end_date && stat.end_time ? `${stat.end_date}T${stat.end_time}` : null;
-            if (!endIso) continue;
-            if (!map[key] || endIso > map[key].last_seen) {
-              map[key] = { sim_number: stat.mac, ip: null, last_seen: endIso };
-              updated++;
-            }
+          for (const svc of services) {
+            if (!svc.login) continue;
+            try {
+              // Fetch the single most recent session for this service login
+              const data = await splynx('get', `/admin/customers/customer/${customer.id}/statistics`, undefined, {
+                itemsPerPage: 10, page: 1, 'sort[id]': 'desc', 'filter[login]': svc.login,
+              }, 15_000);
+              const items: any[] = Array.isArray(data) ? data : (data.items || data.data || []);
+
+              for (const stat of items) {
+                if (!stat.mac || !LTE_NAS_IDS.has(Number(stat.nas_id))) continue;
+                const key = String(svc.id);
+                const endIso = stat.end_date && stat.end_time ? `${stat.end_date}T${stat.end_time}` : null;
+                if (!endIso) continue;
+                if (!map[key] || endIso > map[key].last_seen) {
+                  map[key] = { sim_number: stat.mac, ip: null, last_seen: endIso };
+                  updated++;
+                }
+                break; // only need the most recent
+              }
+            } catch { /* skip service */ }
+
+            await new Promise(r => setTimeout(r, 100));
           }
-        } catch { /* skip customer on timeout */ }
+        } catch { /* skip customer */ }
 
         fs.writeFileSync(SERVICE_SIMS_FILE, JSON.stringify(map), 'utf8');
-        await new Promise(r => setTimeout(r, 200)); // gentle pacing
+        await new Promise(r => setTimeout(r, 200));
       }
 
       console.log(`[rebuild-sims] Done. ${updated} service→SIM entries written.`);
