@@ -62,9 +62,9 @@ router.post('/csv', upload.single('file'), (req: Request, res: Response) => {
 });
 
 // POST /api/import/rebuild-sims
-// Fetches each customer's internet services, then queries the last session
-// for each LTE service by login — one targeted request per service.
-// Completes in a few minutes and correctly handles multi-service customers.
+// For each customer: get their LTE service IDs, then paginate their statistics
+// (newest first) until every service has a MAC or we pass 90 days back.
+// Writes service_id → last known SIM to service-sims.json.
 router.post('/rebuild-sims', async (_req: Request, res: Response) => {
   res.json({ ok: true, message: 'Rebuilding service-sims in background…' });
 
@@ -76,45 +76,59 @@ router.post('/rebuild-sims', async (_req: Request, res: Response) => {
       let map: Record<string, { sim_number: string; ip: string | null; last_seen: string }> = {};
       try { if (fs.existsSync(SERVICE_SIMS_FILE)) map = JSON.parse(fs.readFileSync(SERVICE_SIMS_FILE, 'utf8')); } catch {}
 
+      const cutoff = new Date();
+      cutoff.setDate(cutoff.getDate() - 90); // only look back 90 days
+      const cutoffDate = cutoff.toISOString().slice(0, 10);
+
       let updated = 0;
 
       for (const customer of customers) {
         try {
-          // Get internet services for this customer
+          // Get this customer's internet service IDs
           const svcData = await splynx('get', `/admin/customers/customer/${customer.id}/internet-services`, undefined, undefined, 15_000);
           const services: any[] = Array.isArray(svcData) ? svcData : [];
+          const serviceIds = new Set(services.map((s: any) => String(s.id)));
 
-          for (const svc of services) {
-            if (!svc.login) continue;
-            try {
-              // Fetch the single most recent session for this service login
-              const data = await splynx('get', `/admin/customers/customer/${customer.id}/statistics`, undefined, {
-                itemsPerPage: 10, page: 1, 'sort[id]': 'desc', 'filter[login]': svc.login,
-              }, 15_000);
-              const items: any[] = Array.isArray(data) ? data : (data.items || data.data || []);
+          // Track which services still need a SIM found
+          const pending = new Set(serviceIds);
 
-              for (const stat of items) {
-                if (!stat.mac || !LTE_NAS_IDS.has(Number(stat.nas_id))) continue;
-                const key = String(svc.id);
-                const endIso = stat.end_date && stat.end_time ? `${stat.end_date}T${stat.end_time}` : null;
-                if (!endIso) continue;
-                if (!map[key] || endIso > map[key].last_seen) {
-                  map[key] = { sim_number: stat.mac, ip: null, last_seen: endIso };
-                  updated++;
-                }
-                break; // only need the most recent
+          let page = 1;
+          while (pending.size > 0) {
+            const data = await splynx('get', `/admin/customers/customer/${customer.id}/statistics`, undefined, {
+              itemsPerPage: 50, page, 'sort[id]': 'desc',
+            }, 20_000);
+            const items: any[] = Array.isArray(data) ? data : (data.items || data.data || []);
+            if (!items.length) break;
+
+            let pastCutoff = false;
+            for (const stat of items) {
+              // Stop if we've gone past the 90-day cutoff
+              if (stat.end_date && stat.end_date < cutoffDate) { pastCutoff = true; break; }
+              if (!stat.mac || !stat.service_id || !LTE_NAS_IDS.has(Number(stat.nas_id))) continue;
+
+              const key = String(stat.service_id);
+              if (!pending.has(key)) continue; // already found or not our service
+
+              const endIso = stat.end_date && stat.end_time ? `${stat.end_date}T${stat.end_time}` : null;
+              if (!endIso) continue;
+              if (!map[key] || endIso > map[key].last_seen) {
+                map[key] = { sim_number: stat.mac, ip: null, last_seen: endIso };
+                updated++;
               }
-            } catch { /* skip service */ }
+              pending.delete(key); // found this service's SIM
+            }
 
-            await new Promise(r => setTimeout(r, 100));
+            if (pastCutoff || items.length < 50) break;
+            page++;
+            await new Promise(r => setTimeout(r, 300));
           }
-        } catch { /* skip customer */ }
+        } catch { /* skip customer on timeout */ }
 
         fs.writeFileSync(SERVICE_SIMS_FILE, JSON.stringify(map), 'utf8');
-        await new Promise(r => setTimeout(r, 200));
+        await new Promise(r => setTimeout(r, 300));
       }
 
-      console.log(`[rebuild-sims] Done. ${updated} service→SIM entries written.`);
+      console.log(`[rebuild-sims] Done. ${updated} service→SIM entries written across ${Object.keys(map).length} services.`);
     } catch (err: any) {
       console.error('[rebuild-sims] Error:', err.message);
     }
