@@ -96,6 +96,7 @@ router.post('/rebuild-sims', async (_req: Request, res: Response) => {
           while (pending.size > 0) {
             const data = await splynx('get', `/admin/customers/customer/${customer.id}/statistics`, undefined, {
               itemsPerPage: 50, page, 'sort[id]': 'desc',
+              'filter[end_date]': cutoffDate,  // only sessions newer than cutoff
             }, 20_000);
             const items: any[] = Array.isArray(data) ? data : (data.items || data.data || []);
             if (!items.length) break;
