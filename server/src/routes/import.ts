@@ -1,6 +1,13 @@
 import { Router, Request, Response } from 'express';
+import fs from 'fs';
+import path from 'path';
 import multer from 'multer';
 import { startImport, stopImport, getImportProgress, importFromCsv } from '../services/historyImport';
+import { splynx } from '../lib/splynx';
+
+const DATA_DIR = path.join(__dirname, '../../data');
+const SERVICE_SIMS_FILE = path.join(DATA_DIR, 'service-sims.json');
+const LTE_NAS_IDS = new Set([21, 22]);
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
@@ -52,6 +59,53 @@ router.post('/csv', upload.single('file'), (req: Request, res: Response) => {
     days: result.days,
     errors: result.errors,
   });
+});
+
+// POST /api/import/rebuild-sims
+// Fast scan: fetches only the most recent page of statistics per customer to
+// get the last known MAC per service_id. Completes in ~2–5 minutes vs 2 hours.
+router.post('/rebuild-sims', async (_req: Request, res: Response) => {
+  res.json({ ok: true, message: 'Rebuilding service-sims in background…' });
+
+  (async () => {
+    try {
+      const customerData = await splynx('get', '/admin/customers/customer', undefined, { itemsPerPage: 500 });
+      const customers: any[] = Array.isArray(customerData) ? customerData : (customerData.items || []);
+
+      // Load existing map so we don't lose entries already there
+      let map: Record<string, { sim_number: string; ip: string | null; last_seen: string }> = {};
+      try { if (fs.existsSync(SERVICE_SIMS_FILE)) map = JSON.parse(fs.readFileSync(SERVICE_SIMS_FILE, 'utf8')); } catch {}
+
+      let updated = 0;
+      for (const customer of customers) {
+        try {
+          // Fetch only the first page (newest records)
+          const data = await splynx('get', `/admin/customers/customer/${customer.id}/statistics`, undefined, {
+            itemsPerPage: 50, page: 1, 'sort[id]': 'desc',
+          }, 20_000);
+          const items: any[] = Array.isArray(data) ? data : (data.items || data.data || []);
+
+          for (const stat of items) {
+            if (!stat.mac || !stat.service_id || !LTE_NAS_IDS.has(Number(stat.nas_id))) continue;
+            const key = String(stat.service_id);
+            const endIso = stat.end_date && stat.end_time ? `${stat.end_date}T${stat.end_time}` : null;
+            if (!endIso) continue;
+            if (!map[key] || endIso > map[key].last_seen) {
+              map[key] = { sim_number: stat.mac, ip: null, last_seen: endIso };
+              updated++;
+            }
+          }
+        } catch { /* skip customer on timeout */ }
+
+        fs.writeFileSync(SERVICE_SIMS_FILE, JSON.stringify(map), 'utf8');
+        await new Promise(r => setTimeout(r, 200)); // gentle pacing
+      }
+
+      console.log(`[rebuild-sims] Done. ${updated} service→SIM entries written.`);
+    } catch (err: any) {
+      console.error('[rebuild-sims] Error:', err.message);
+    }
+  })();
 });
 
 export default router;
