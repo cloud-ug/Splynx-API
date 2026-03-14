@@ -124,10 +124,9 @@ router.get('/lte-summary', async (_req: Request, res: Response) => {
             upload_bytes: Number(activeSession.out_bytes) || 0,
           });
         } else {
-          // Offline SIM lookup — only for services that have ever had an LTE session,
-          // identified by presence in service-sims.json (populated by live polls + history import).
-          // Dedicated/fiber services never appear there and never get a SIM.
-          const isLte = !!serviceSims[String(serviceId)];
+          // A service is LTE-capable if it's tariff 37 (Cloud-LTE) OR has ever appeared
+          // in service-sims.json (covers non-standard LTE tariffs like Brian Percy tariff 71).
+          const isLte = Number(svc.tariff_id) === 37 || !!serviceSims[String(serviceId)];
           const serviceSim = isLte ? (serviceSims[String(serviceId)] || null) : null;
           // Only fall back to customer-level SIM if this customer has exactly one LTE service —
           // otherwise we'd stamp the same SIM on all their LTE logins
