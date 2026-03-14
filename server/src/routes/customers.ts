@@ -97,6 +97,9 @@ router.get('/lte-summary', async (_req: Request, res: Response) => {
     const rows: any[] = [];
 
     for (const { customerId, customerName, services } of allServices) {
+      // Count LTE services per customer — customer-level SIM fallback is only safe when there's exactly one
+      const lteServiceCount = services.filter((s: any) => Number(s.tariff_id) === 37).length;
+
       for (const svc of services) {
         const serviceId = Number(svc.id);
         const login = String(svc.login || '').toLowerCase();
@@ -121,11 +124,15 @@ router.get('/lte-summary', async (_req: Request, res: Response) => {
             upload_bytes: Number(activeSession.out_bytes) || 0,
           });
         } else {
-          // Offline — three-tier SIM lookup (same logic as history import: NAS 21/22 sessions only):
-          //   1. service-sims.json  — updated every live-session poll (most specific: per service_id)
-          //   2. daily tracker by customer_id — last SIM seen for this customer across all their sessions
-          const serviceSim = serviceSims[String(serviceId)] || null;
-          const customerTracker = lastKnownByCustomer.get(Number(customerId)) || null;
+          // Offline SIM lookup — only for Cloud-LTE services (tariff 37), which are the only
+          // ones that use SIM cards. Dedicated/fiber services never have a SIM.
+          const isLte = Number(svc.tariff_id) === 37;
+          const serviceSim = isLte ? (serviceSims[String(serviceId)] || null) : null;
+          // Only fall back to customer-level SIM if this customer has exactly one LTE service —
+          // otherwise we'd stamp the same SIM on all their LTE logins
+          const customerTracker = (isLte && lteServiceCount === 1)
+            ? (lastKnownByCustomer.get(Number(customerId)) || null)
+            : null;
 
           const simNumber = serviceSim?.sim_number || customerTracker?.sim_number || null;
           const tracker = simNumber ? lastKnownBySim.get(simNumber) : null;
