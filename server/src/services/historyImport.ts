@@ -77,6 +77,29 @@ export function getImportProgress(): ImportProgress {
   return { ...progress };
 }
 
+// ─── Service→SIM persistent map (shared with sessions.ts) ───────────────────
+
+const SERVICE_SIMS_FILE = path.join(DATA_DIR, 'service-sims.json');
+
+function loadServiceSims(): Record<string, { sim_number: string; ip: string | null; last_seen: string }> {
+  try {
+    if (fs.existsSync(SERVICE_SIMS_FILE)) return JSON.parse(fs.readFileSync(SERVICE_SIMS_FILE, 'utf8'));
+  } catch { /* ignore */ }
+  return {};
+}
+
+// Write service_id→SIM entries from history — only update if this record is newer
+function recordServiceSimFromHistory(serviceId: number, simNumber: string, endIso: string) {
+  if (!serviceId || !simNumber) return;
+  const map = loadServiceSims();
+  const key = String(serviceId);
+  const existing = map[key];
+  if (!existing || endIso > existing.last_seen) {
+    map[key] = { sim_number: simNumber, ip: null, last_seen: endIso };
+    fs.writeFileSync(SERVICE_SIMS_FILE, JSON.stringify(map), 'utf8');
+  }
+}
+
 // ─── File helpers (same format as sessions.ts) ───────────────────────────────
 
 function dataFile(date: string) {
@@ -220,6 +243,11 @@ async function processCustomer(
         in_bytes: Number(stat.in_bytes) || 0,
         out_bytes: Number(stat.out_bytes) || 0,
       });
+
+      // Also update service→SIM map so offline services show their last known SIM
+      if (stat.service_id) {
+        recordServiceSimFromHistory(Number(stat.service_id), stat.mac, endIso);
+      }
 
       daysAdded.add(day);
       imported++;
