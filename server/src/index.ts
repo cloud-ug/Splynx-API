@@ -7,6 +7,7 @@ import sessionsRouter from './routes/sessions';
 import customersRouter from './routes/customers';
 import importRouter from './routes/import';
 import { startAccountingMonitor, getLastHealthResult } from './services/accountingMonitor';
+import { startSimPoller } from './services/simPoller';
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -147,4 +148,5 @@ app.get('/api/debug/auth', async (_req, res) => {
 app.listen(PORT, () => {
   console.log(`Splynx API server running on http://localhost:${PORT}`);
   startAccountingMonitor();
+  startSimPoller();
 });

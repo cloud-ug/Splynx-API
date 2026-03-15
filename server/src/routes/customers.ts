@@ -78,10 +78,12 @@ router.get('/lte-summary', async (_req: Request, res: Response) => {
     }
 
     // 4. Fetch internet services for all customers in parallel (batched)
+    // Only active customers — disabled/blocked customers have no live services worth showing
+    const activeCustomers = customers.filter((c: any) => c.status === 'active');
     const BATCH = 10;
     const allServices: any[] = [];
-    for (let i = 0; i < customers.length; i += BATCH) {
-      const batch = customers.slice(i, i + BATCH);
+    for (let i = 0; i < activeCustomers.length; i += BATCH) {
+      const batch = activeCustomers.slice(i, i + BATCH);
       const results = await Promise.allSettled(
         batch.map(c =>
           splynx('get', `/admin/customers/customer/${c.id}/internet-services`)
@@ -101,6 +103,9 @@ router.get('/lte-summary', async (_req: Request, res: Response) => {
       const lteServiceCount = services.filter((s: any) => Number(s.tariff_id) === 37).length;
 
       for (const svc of services) {
+        // Skip non-active services (stopped, disabled, blocked)
+        if (svc.status !== 'active') continue;
+
         const serviceId = Number(svc.id);
         const login = String(svc.login || '').toLowerCase();
 

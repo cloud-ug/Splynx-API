@@ -62,78 +62,116 @@ router.post('/csv', upload.single('file'), (req: Request, res: Response) => {
 });
 
 // POST /api/import/rebuild-sims
-// For each customer: get their LTE service IDs, then paginate their statistics
-// (newest first) until every service has a MAC or we pass 90 days back.
+// Two-pass rebuild of service-sims.json:
+//   Pass 1 — scrape customers-online (live sessions) for immediate service_id→SIM entries.
+//             This catches sessions that are currently active and won't appear in statistics yet.
+//   Pass 2 — for each customer's services still missing a SIM, paginate their statistics
+//             history (newest first) until the SIM is found or we pass 90 days back.
 // Writes service_id → last known SIM to service-sims.json.
 router.post('/rebuild-sims', async (_req: Request, res: Response) => {
   res.json({ ok: true, message: 'Rebuilding service-sims in background…' });
 
   (async () => {
     try {
-      const customerData = await splynx('get', '/admin/customers/customer', undefined, { itemsPerPage: 500 });
-      const customers: any[] = Array.isArray(customerData) ? customerData : (customerData.items || []);
-
       let map: Record<string, { sim_number: string; ip: string | null; last_seen: string }> = {};
       try { if (fs.existsSync(SERVICE_SIMS_FILE)) map = JSON.parse(fs.readFileSync(SERVICE_SIMS_FILE, 'utf8')); } catch {}
 
-      const cutoff = new Date();
-      cutoff.setDate(cutoff.getDate() - 90); // only look back 90 days
-      const cutoffDate = cutoff.toISOString().slice(0, 10);
+      // ── Pass 1: live sessions from customers-online ──────────────────────────
+      // Active sessions have service_id + mac and are the most up-to-date source.
+      try {
+        const sessionData = await splynx('get', '/admin/customers/customers-online', undefined, { itemsPerPage: 1000 }, 20_000);
+        const sessions: any[] = Array.isArray(sessionData) ? sessionData : (sessionData.items || sessionData.data || []);
+        const now = new Date().toISOString();
+        let liveUpdated = 0;
+        for (const s of sessions) {
+          if (!s.mac || !s.service_id) continue;
+          const key = String(s.service_id);
+          if (!map[key] || now > map[key].last_seen) {
+            map[key] = { sim_number: s.mac, ip: s.ipv4 || null, last_seen: now };
+            liveUpdated++;
+          }
+        }
+        fs.writeFileSync(SERVICE_SIMS_FILE, JSON.stringify(map), 'utf8');
+        console.log(`[rebuild-sims] Pass 1 (live sessions): ${liveUpdated} entries from ${sessions.filter((s: any) => s.mac && s.service_id).length} online SIM sessions`);
+      } catch (err: any) {
+        console.warn('[rebuild-sims] Pass 1 failed:', err.message);
+      }
 
+      // ── Pass 2: statistics history per customer ───────────────────────────────
+      // The Splynx statistics endpoint ignores itemsPerPage and returns all records
+      // in ascending date order. We fetch once per customer and scan everything,
+      // keeping the most recent mac per service_id across all history (no date cutoff).
+      const customerData = await splynx('get', '/admin/customers/customer', undefined, { itemsPerPage: 500 });
+      const allCustomers: any[] = Array.isArray(customerData) ? customerData : (customerData.items || []);
+      const customers = allCustomers.filter((c: any) => c.status === 'active');
       let updated = 0;
 
       for (const customer of customers) {
         try {
-          // Get this customer's internet service IDs
           const svcData = await splynx('get', `/admin/customers/customer/${customer.id}/internet-services`, undefined, undefined, 15_000);
           const services: any[] = Array.isArray(svcData) ? svcData : [];
-          const serviceIds = new Set(services.map((s: any) => String(s.id)));
+          const serviceIdSet = new Set(services.map((s: any) => String(s.id)));
 
-          // Track which services still need a SIM found
-          const pending = new Set(serviceIds);
+          // Only process customers that have at least one service still missing a SIM
+          const needsSim = services.some((s: any) => !map[String(s.id)]);
+          if (!needsSim) continue;
 
-          let page = 1;
-          while (pending.size > 0) {
-            const data = await splynx('get', `/admin/customers/customer/${customer.id}/statistics`, undefined, {
-              itemsPerPage: 50, page, 'sort[id]': 'desc',
-              'filter[end_date]': cutoffDate,  // only sessions newer than cutoff
-            }, 20_000);
-            const items: any[] = Array.isArray(data) ? data : (data.items || data.data || []);
-            if (!items.length) break;
+          // Fetch all statistics in one call — endpoint ignores itemsPerPage
+          const data = await splynx('get', `/admin/customers/customer/${customer.id}/statistics`, undefined, {}, 120_000);
+          const items: any[] = Array.isArray(data) ? data : (data.items || data.data || []);
 
-            let pastCutoff = false;
-            for (const stat of items) {
-              // Stop if we've gone past the 90-day cutoff
-              if (stat.end_date && stat.end_date < cutoffDate) { pastCutoff = true; break; }
-              if (!stat.mac || !stat.service_id) continue; // any session with a MAC is SIM-based (misprovision can put SIM on any NAS)
+          for (const stat of items) {
+            if (!stat.mac || !stat.service_id) continue;
+            if (!serviceIdSet.has(String(stat.service_id))) continue;
 
-              const key = String(stat.service_id);
-              if (!pending.has(key)) continue; // already found or not our service
-
-              const endIso = stat.end_date && stat.end_time ? `${stat.end_date}T${stat.end_time}` : null;
-              if (!endIso) continue;
-              if (!map[key] || endIso > map[key].last_seen) {
-                map[key] = { sim_number: stat.mac, ip: null, last_seen: endIso };
-                updated++;
-              }
-              pending.delete(key); // found this service's SIM
+            const key = String(stat.service_id);
+            const endIso = stat.end_date && stat.end_time ? `${stat.end_date}T${stat.end_time}` : null;
+            if (!endIso) continue;
+            // Keep the most recent session for each service
+            if (!map[key] || endIso > map[key].last_seen) {
+              map[key] = { sim_number: stat.mac, ip: null, last_seen: endIso };
+              if (!map[key]) updated++;
+              updated++;
             }
-
-            if (pastCutoff || items.length < 50) break;
-            page++;
-            await new Promise(r => setTimeout(r, 300));
           }
-        } catch { /* skip customer on timeout */ }
+        } catch (err: any) {
+          console.warn(`[rebuild-sims] Customer ${customer.id} failed: ${err.message}`);
+        }
 
         fs.writeFileSync(SERVICE_SIMS_FILE, JSON.stringify(map), 'utf8');
-        await new Promise(r => setTimeout(r, 300));
+        await new Promise(r => setTimeout(r, 200));
       }
 
-      console.log(`[rebuild-sims] Done. ${updated} service→SIM entries written across ${Object.keys(map).length} services.`);
+      console.log(`[rebuild-sims] Done. Pass 2 added ${updated} entries. Total: ${Object.keys(map).length} services mapped.`);
     } catch (err: any) {
       console.error('[rebuild-sims] Error:', err.message);
     }
   })();
+});
+
+// GET /api/import/debug-stats/:customerId?pages=3
+// Shows first N pages of statistics for a customer — reveals what mac/service_id looks like
+router.get('/debug-stats/:customerId', async (req: Request, res: Response) => {
+  const cid = req.params.customerId;
+  const pages = Math.min(Number(req.query.pages) || 2, 5);
+  const results: any[] = [];
+  for (let page = 1; page <= pages; page++) {
+    try {
+      const data = await splynx('get', `/admin/customers/customer/${cid}/statistics`, undefined, {
+        itemsPerPage: 25, page, 'sort[id]': 'desc',
+      }, 120_000);
+      const items: any[] = Array.isArray(data) ? data : (data.items || data.data || []);
+      results.push({ page, count: items.length, records: items.map((r: any) => ({
+        id: r.id, service_id: r.service_id, mac: r.mac, nas_id: r.nas_id,
+        end_date: r.end_date, end_time: r.end_time,
+      }))});
+      if (items.length < 25) break;
+    } catch (err: any) {
+      results.push({ page, error: err.message });
+      break;
+    }
+  }
+  res.json({ customer_id: cid, results });
 });
 
 export default router;
