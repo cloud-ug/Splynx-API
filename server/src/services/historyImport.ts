@@ -26,8 +26,8 @@ const REQUEST_TIMEOUT_MS = 45_000;
 const MAX_RETRIES = 2;
 const MAX_CUSTOMER_MS = 3 * 60 * 1000; // skip customer after 3 minutes total
 
-// LTE NAS device IDs (MTN-LTE-# and MTN-LTE-NEW)
-const LTE_NAS_IDS = new Set([21, 22]);
+// LTE NAS device IDs: MTN-LTE-1 (6), MTN-LTE-2 (7), MTN-LTE-# (21), MTN-LTE-NEW (22)
+const LTE_NAS_IDS = new Set([6, 7, 21, 22]);
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 

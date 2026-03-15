@@ -7,7 +7,7 @@ import { splynx } from '../lib/splynx';
 
 const DATA_DIR = path.join(__dirname, '../../data');
 const SERVICE_SIMS_FILE = path.join(DATA_DIR, 'service-sims.json');
-const LTE_NAS_IDS = new Set([21, 22]);
+const LTE_NAS_IDS = new Set([6, 7, 21, 22]); // MTN-LTE-1, MTN-LTE-2, MTN-LTE-#, MTN-LTE-NEW
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
@@ -85,6 +85,7 @@ router.post('/rebuild-sims', async (_req: Request, res: Response) => {
         let liveUpdated = 0;
         for (const s of sessions) {
           if (!s.mac || !s.service_id) continue;
+          if (!LTE_NAS_IDS.has(Number(s.nas_id))) continue;
           const key = String(s.service_id);
           if (!map[key] || now > map[key].last_seen) {
             map[key] = { sim_number: s.mac, ip: s.ipv4 || null, last_seen: now };
@@ -149,17 +150,19 @@ router.post('/rebuild-sims', async (_req: Request, res: Response) => {
   })();
 });
 
-// GET /api/import/debug-stats/:customerId?pages=3
-// Shows first N pages of statistics for a customer — reveals what mac/service_id looks like
+// GET /api/import/debug-stats/:customerId?pages=3&service_id=XXXX&start_page=1
+// Shows statistics pages for a customer, with optional service_id filter and start page
 router.get('/debug-stats/:customerId', async (req: Request, res: Response) => {
   const cid = req.params.customerId;
   const pages = Math.min(Number(req.query.pages) || 2, 5);
+  const startPage = Number(req.query.start_page) || 1;
+  const serviceId = req.query.service_id ? Number(req.query.service_id) : null;
   const results: any[] = [];
-  for (let page = 1; page <= pages; page++) {
+  for (let page = startPage; page < startPage + pages; page++) {
     try {
-      const data = await splynx('get', `/admin/customers/customer/${cid}/statistics`, undefined, {
-        itemsPerPage: 25, page, 'sort[id]': 'desc',
-      }, 120_000);
+      const params: Record<string, any> = { itemsPerPage: 25, page, 'sort[id]': 'desc' };
+      if (serviceId) params['filter[service_id]'] = serviceId;
+      const data = await splynx('get', `/admin/customers/customer/${cid}/statistics`, undefined, params, 120_000);
       const items: any[] = Array.isArray(data) ? data : (data.items || data.data || []);
       results.push({ page, count: items.length, records: items.map((r: any) => ({
         id: r.id, service_id: r.service_id, mac: r.mac, nas_id: r.nas_id,

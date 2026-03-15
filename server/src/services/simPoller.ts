@@ -29,8 +29,11 @@ async function pollLiveSims() {
     const now = new Date().toISOString();
     let updated = 0;
 
+    // Only record sessions on LTE NAS devices: MTN-LTE-1(6), MTN-LTE-2(7), MTN-LTE-#(21), MTN-LTE-NEW(22)
+    const LTE_NAS_IDS = new Set([6, 7, 21, 22]);
     for (const s of sessions) {
       if (!s.mac || !s.service_id) continue;
+      if (!LTE_NAS_IDS.has(Number(s.nas_id))) continue;
       const key = String(s.service_id);
       if (!map[key] || now > map[key].last_seen) {
         map[key] = { sim_number: s.mac, ip: s.ipv4 || null, last_seen: now };

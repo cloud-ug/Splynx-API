@@ -129,6 +129,51 @@ router.get('/online', async (req: Request, res: Response) => {
   }
 });
 
+// POST /api/sessions/disconnect
+// Sends a RADIUS disconnect (CoA) for sessions matching given service IDs or logins.
+// Body: { service_ids?: number[], logins?: string[] }
+// Splynx disconnects by DELETE /admin/customers/customers-online/{id}
+router.post('/disconnect', async (req: Request, res: Response) => {
+  const serviceIds: Set<number> = new Set((req.body.service_ids || []).map(Number));
+  const logins: Set<string> = new Set((req.body.logins || []).map((l: string) => l.toLowerCase()));
+
+  if (serviceIds.size === 0 && logins.size === 0) {
+    res.status(400).json({ error: 'Provide service_ids or logins array' });
+    return;
+  }
+
+  try {
+    const data = await splynx('get', '/admin/customers/customers-online', undefined, { itemsPerPage: 1000 });
+    const sessions: any[] = Array.isArray(data) ? data : (data.items || data.data || []);
+
+    // Find matching sessions
+    const targets = sessions.filter(s =>
+      (s.service_id && serviceIds.has(Number(s.service_id))) ||
+      (s.login && logins.has(String(s.login).toLowerCase()))
+    );
+
+    if (targets.length === 0) {
+      res.json({ ok: true, disconnected: 0, message: 'No matching online sessions found' });
+      return;
+    }
+
+    const results: any[] = [];
+    for (const session of targets) {
+      try {
+        await splynx('delete', `/admin/customers/customers-online/${session.id}`);
+        results.push({ session_id: session.id, login: session.login, service_id: session.service_id, ok: true });
+      } catch (err: any) {
+        results.push({ session_id: session.id, login: session.login, service_id: session.service_id, ok: false, error: err.message });
+      }
+      await new Promise(r => setTimeout(r, 200));
+    }
+
+    res.json({ ok: true, disconnected: results.filter(r => r.ok).length, total: results.length, results });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/sessions/online/lte-sims
 // Returns deduplicated LTE SIMs (type=radius, mac = SIM number) with customer names
 router.get('/online/lte-sims', async (_req: Request, res: Response) => {
