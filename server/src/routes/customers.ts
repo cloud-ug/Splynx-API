@@ -230,4 +230,24 @@ router.get('/:id/invoices', async (req: Request, res: Response) => {
   }
 });
 
+// PUT /api/customers/:id/services/:serviceId  { status: 'active'|'disabled'|'stopped' }
+router.put('/:id/services/:serviceId', async (req: Request, res: Response) => {
+  try {
+    const data = await splynx('put', `/admin/customers/customer/${req.params.id}/internet-services--${req.params.serviceId}`, req.body);
+    res.json(data);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/customers/:id/services/:serviceId
+router.delete('/:id/services/:serviceId', async (req: Request, res: Response) => {
+  try {
+    await splynx('delete', `/admin/customers/customer/${req.params.id}/internet-services--${req.params.serviceId}`);
+    res.json({ ok: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 export default router;

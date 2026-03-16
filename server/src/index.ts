@@ -39,7 +39,10 @@ app.get('/', (_req, res) => res.json({
     'GET  /api/customers/:id',
     'GET  /api/customers/:id/services',
     'GET  /api/customers/:id/invoices',
+    'PUT  /api/customers/:id/services/:serviceId',
+    'DELETE /api/customers/:id/services/:serviceId',
     'POST /api/import/rebuild-sims',
+    'POST /api/import/fill-missing-sims',
     'GET  /api/import/debug-stats/:customerId',
   ],
 }));
