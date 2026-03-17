@@ -14,20 +14,6 @@ import path from 'path';
 import { splynx } from '../lib/splynx';
 
 const DATA_DIR = path.join(__dirname, '../../data');
-const SERVICE_SIMS_FILE = path.join(DATA_DIR, 'service-sims.json');
-
-// Pick a handful of customer IDs from the service-sims map to use as fallback probes
-function getRecentCustomerIds(limit = 5): number[] {
-  try {
-    if (!fs.existsSync(SERVICE_SIMS_FILE)) return [];
-    const map: Record<string, { sim_number: string; ip: string | null; last_seen: string }> =
-      JSON.parse(fs.readFileSync(SERVICE_SIMS_FILE, 'utf8'));
-    // Sort by last_seen descending, return unique customer IDs (service-sims is keyed by service_id,
-    // but we don't store customer_id there — so just probe a few known-active ones from the daily files)
-    const entries = Object.values(map).sort((a, b) => b.last_seen.localeCompare(a.last_seen));
-    return entries.slice(0, limit).map((_, i) => i); // placeholder — see below
-  } catch { return []; }
-}
 
 // Read last-seen customer IDs from the most recent daily session file
 function getRecentCustomerIdsFromDailyFiles(limit = 5): number[] {
