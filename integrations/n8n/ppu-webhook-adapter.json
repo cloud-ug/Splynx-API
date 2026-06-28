@@ -1,0 +1,88 @@
+{
+  "name": "Cloud-Fi PPU — Webhook Adapter (sign & forward)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ppu-trigger",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-in",
+      "name": "Incoming Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [260, 300],
+      "webhookId": "cloudfi-ppu-trigger"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Build the EXACT JSON string we will both sign and send.\n// Accepts the payload under .body (n8n webhook) or at the root.\nconst src = $json.body || $json;\nif (!src.customer_id || !src.target_tier) {\n  throw new Error('payload must include customer_id and target_tier (ACTIVE|IDLE)');\n}\nconst b = { customer_id: Number(src.customer_id), target_tier: String(src.target_tier).toUpperCase() };\nif (src.bundle) b.bundle = src.bundle;            // e.g. 'weekend' -> drives the charge amount on ACTIVE\nif (src.amount) b.amount = Number(src.amount);    // explicit gross UGX override\nif (src.payment_ref) b.payment_ref = src.payment_ref;\nif (src.record_payment !== undefined) b.record_payment = src.record_payment === true || src.record_payment === 'true';\nconst bodyString = JSON.stringify(b);\nreturn { bodyString };"
+      },
+      "id": "build-body",
+      "name": "Build Signed Body",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "action": "hmac",
+        "type": "SHA256",
+        "value": "={{ $json.bodyString }}",
+        "dataPropertyName": "signature",
+        "secret": "={{ $env.WEBHOOK_SECRET }}",
+        "encoding": "hex"
+      },
+      "id": "sign",
+      "name": "HMAC Sign",
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 1,
+      "position": [700, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SPLYNX_API_BASE }}/api/ppu/trigger",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-ppu-signature", "value": "={{ $json.signature }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.bodyString }}",
+        "options": { "response": { "response": { "neverError": true, "fullResponse": true } } }
+      },
+      "id": "forward",
+      "name": "POST to Splynx-API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [920, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: true, forwarded: $json.body || $json } }}",
+        "options": {}
+      },
+      "id": "respond",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1140, 300]
+    }
+  ],
+  "connections": {
+    "Incoming Trigger": { "main": [[{ "node": "Build Signed Body", "type": "main", "index": 0 }]] },
+    "Build Signed Body": { "main": [[{ "node": "HMAC Sign", "type": "main", "index": 0 }]] },
+    "HMAC Sign": { "main": [[{ "node": "POST to Splynx-API", "type": "main", "index": 0 }]] },
+    "POST to Splynx-API": { "main": [[{ "node": "Respond", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" }
+}

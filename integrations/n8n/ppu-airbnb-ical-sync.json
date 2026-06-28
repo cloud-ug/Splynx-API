@@ -1,0 +1,110 @@
+{
+  "name": "Cloud-Fi PPU — Airbnb iCal Sync",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "minutes", "minutesInterval": 15 }] }
+      },
+      "id": "schedule",
+      "name": "Every 15 min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// EDIT THIS: one row per Airbnb listing -> Splynx customer + bundle.\n// customer_id is the Splynx customer id; bundle drives the ACTIVE charge.\nconst LISTINGS = [\n  { listing: 'Kololo Apt 1', ical_url: 'https://www.airbnb.com/calendar/ical/XXXX.ics?s=AAAA', customer_id: 101, bundle: 'weekend' },\n  { listing: 'Entebbe Studio', ical_url: 'https://www.airbnb.com/calendar/ical/YYYY.ics?s=BBBB', customer_id: 102, bundle: 'weekend' }\n];\nreturn LISTINGS.map(json => ({ json }));"
+      },
+      "id": "listings",
+      "name": "Listings",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.ical_url }}",
+        "options": {
+          "response": { "response": { "neverError": true, "responseFormat": "text" } }
+        }
+      },
+      "id": "fetch-ical",
+      "name": "Fetch iCal",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [640, 300]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Correlate each iCal response to its listing by index (Fetch iCal has\n// neverError=true so failed fetches still yield an item, keeping alignment).\nconst listings = $('Listings').all();\nconst responses = $input.all();\nconst pad = n => String(n).padStart(2, '0');\n// 'today' in EAT (UTC+3)\nconst now = new Date(Date.now() + 3 * 3600 * 1000);\nconst today = `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}`;\nconst store = $getWorkflowStaticData('global');\nconst out = [];\nfor (let i = 0; i < responses.length; i++) {\n  const meta = (listings[i] && listings[i].json) || {};\n  if (!meta.customer_id) continue;\n  const r = responses[i].json;\n  const ical = r.data || r.body || (typeof r === 'string' ? r : '') || '';\n  const blocks = String(ical).split('BEGIN:VEVENT').slice(1);\n  for (const blk of blocks) {\n    const ds = (blk.match(/DTSTART[^:]*:(\\d{8})/) || [])[1];\n    const de = (blk.match(/DTEND[^:]*:(\\d{8})/) || [])[1];\n    const uid = ((blk.match(/UID:([^\\r\\n]+)/) || [])[1] || `${ds}-${de}`).trim();\n    if (ds === today) {\n      const k = `${meta.customer_id}|${uid}|ACTIVE`;\n      if (!store[k]) { store[k] = Date.now(); out.push({ json: { customer_id: meta.customer_id, target_tier: 'ACTIVE', bundle: meta.bundle || 'weekend' } }); }\n    }\n    if (de === today) {\n      const k = `${meta.customer_id}|${uid}|IDLE`;\n      if (!store[k]) { store[k] = Date.now(); out.push({ json: { customer_id: meta.customer_id, target_tier: 'IDLE' } }); }\n    }\n  }\n}\nreturn out;"
+      },
+      "id": "detect",
+      "name": "Detect Check-in / Checkout",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [860, 300]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const b = { customer_id: Number($json.customer_id), target_tier: $json.target_tier };\nif ($json.bundle) b.bundle = $json.bundle;\nreturn { bodyString: JSON.stringify(b) };"
+      },
+      "id": "build-body",
+      "name": "Build Signed Body",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1080, 300]
+    },
+    {
+      "parameters": {
+        "action": "hmac",
+        "type": "SHA256",
+        "value": "={{ $json.bodyString }}",
+        "dataPropertyName": "signature",
+        "secret": "={{ $env.WEBHOOK_SECRET }}",
+        "encoding": "hex"
+      },
+      "id": "sign",
+      "name": "HMAC Sign",
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 1,
+      "position": [1300, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SPLYNX_API_BASE }}/api/ppu/trigger",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-ppu-signature", "value": "={{ $json.signature }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.bodyString }}",
+        "options": { "response": { "response": { "neverError": true, "fullResponse": true } } }
+      },
+      "id": "forward",
+      "name": "POST to Splynx-API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1520, 300]
+    }
+  ],
+  "connections": {
+    "Every 15 min": { "main": [[{ "node": "Listings", "type": "main", "index": 0 }]] },
+    "Listings": { "main": [[{ "node": "Fetch iCal", "type": "main", "index": 0 }]] },
+    "Fetch iCal": { "main": [[{ "node": "Detect Check-in / Checkout", "type": "main", "index": 0 }]] },
+    "Detect Check-in / Checkout": { "main": [[{ "node": "Build Signed Body", "type": "main", "index": 0 }]] },
+    "Build Signed Body": { "main": [[{ "node": "HMAC Sign", "type": "main", "index": 0 }]] },
+    "HMAC Sign": { "main": [[{ "node": "POST to Splynx-API", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" }
+}
