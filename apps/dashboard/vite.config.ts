@@ -6,7 +6,8 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      '/api': 'http://localhost:4000',
+      // Override for LAN/remote dev with VITE_API_HOST (e.g. http://10.12.11.30:4000)
+      '/api': process.env.VITE_API_HOST || 'http://localhost:4000',
     },
   },
 });
