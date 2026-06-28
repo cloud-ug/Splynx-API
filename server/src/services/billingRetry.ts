@@ -81,18 +81,20 @@ async function attempt(intent: BillingIntent): Promise<boolean> {
 
   await splynx('post', '/admin/finance/transactions', {
     customer_id: intent.customer_id,
-    category_id: TX_CATEGORY_ID,
+    category: TX_CATEGORY_ID,           // Splynx field is `category` (1 = Service)
     service_id: intent.service_id,
     description: `${label} (service ${intent.service_id}) [retry]`,
     quantity: 1,
     price: net,
     tax_percent: Math.round(VAT_RATE * 100),
+    total: intent.gross,
     date: today,
   });
 
   if (intent.record_payment) {
     await splynx('post', '/admin/finance/payments', {
       customer_id: intent.customer_id,
+      payment_type: Number(process.env.PPU_PAYMENT_METHOD_ID || 5),
       amount: intent.gross,
       date: today,
       comment: intent.payment_ref ? `MoMo ${intent.payment_ref}` : `PPU ${label}`,

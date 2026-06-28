@@ -136,12 +136,13 @@ async function createBillingRecord(opts: {
   try {
     const tx: any = await splynx('post', '/admin/finance/transactions', {
       customer_id: Number(customerId),
-      category_id: TX_CATEGORY_ID,
+      category: TX_CATEGORY_ID,         // Splynx field is `category` (1 = Service)
       service_id: serviceId,
       description: `${label} (service ${serviceId})`,
       quantity: 1,
       price: net,                       // net unit price
       tax_percent: Math.round(VAT_RATE * 100),
+      total: gross,                     // VAT-inclusive total
       date: today,
     });
     const transactionId = tx?.id || tx?.transaction_id;
@@ -150,6 +151,7 @@ async function createBillingRecord(opts: {
     if (recordPayment) {
       const pay: any = await splynx('post', '/admin/finance/payments', {
         customer_id: Number(customerId),
+        payment_type: Number(process.env.PPU_PAYMENT_METHOD_ID || 5), // 5 = Other (no MoMo method defined)
         amount: gross,                  // gross collected via MoMo
         date: today,
         comment: paymentRef ? `MoMo ${paymentRef}` : `PPU ${label}`,
