@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Users, Search, RefreshCw, Wifi, WifiOff, Download } from 'lucide-react';
+import { Users, Search, RefreshCw, Wifi, WifiOff, Download, Calendar, X, ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react';
 import clsx from 'clsx';
 import api from '../../api/client';
 
@@ -59,6 +59,18 @@ function formatLastSeen(iso: string | null) {
 export default function CustomersPage() {
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<'all' | 'online' | 'active' | 'offline' | 'lte'>('all');
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
+  const [sortKey, setSortKey] = useState<keyof ServiceRow | null>(null);
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
+
+  const dateFilterActive = dateFrom !== '' || dateTo !== '';
+  function clearDates() { setDateFrom(''); setDateTo(''); }
+
+  function toggleSort(key: keyof ServiceRow) {
+    if (sortKey === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    else { setSortKey(key); setSortDir('asc'); }
+  }
 
   const query = useQuery({
     queryKey: ['lte-summary'],
@@ -73,16 +85,32 @@ export default function CustomersPage() {
     if (filter !== 'all' && filter !== 'lte' && s.status !== filter) return false;
     if (search) {
       const q = search.toLowerCase();
-      return (
+      if (!(
         s.customer_name.toLowerCase().includes(q) ||
         s.service_login.toLowerCase().includes(q) ||
         (s.sim_number?.toLowerCase().includes(q) ?? false) ||
         (s.ip?.toLowerCase().includes(q) ?? false) ||
         (s.description?.toLowerCase().includes(q) ?? false)
-      );
+      )) return false;
+    }
+    if (dateFilterActive && s.last_seen) {
+      const ts = new Date(s.last_seen.replace(' ', 'T')).getTime();
+      if (dateFrom && ts < new Date(dateFrom).getTime()) return false;
+      if (dateTo && ts > new Date(dateTo + 'T23:59:59').getTime()) return false;
+    } else if (dateFilterActive && !s.last_seen) {
+      return false;
     }
     return true;
   });
+
+  const sorted = sortKey ? [...filtered].sort((a, b) => {
+    const av = a[sortKey] ?? '';
+    const bv = b[sortKey] ?? '';
+    const cmp = typeof av === 'number' && typeof bv === 'number'
+      ? av - bv
+      : String(av).localeCompare(String(bv));
+    return sortDir === 'asc' ? cmp : -cmp;
+  }) : filtered;
 
   function exportCsv() {
     if (!data) return;
@@ -140,7 +168,7 @@ export default function CustomersPage() {
       </div>
 
       {/* Filters + Search */}
-      <div className="flex gap-3 mb-4">
+      <div className="flex gap-3 mb-3">
         <div className="relative flex-1">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={16} />
           <input type="text" placeholder="Search by customer, login, SIM, or IP…"
@@ -158,6 +186,27 @@ export default function CustomersPage() {
         </div>
       </div>
 
+      {/* Date Range Filter */}
+      <div className="flex items-center gap-3 mb-4">
+        <Calendar size={15} className="text-gray-400 shrink-0" />
+        <span className="text-xs text-gray-500 shrink-0">Last seen:</span>
+        <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)}
+          className="px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+        <span className="text-gray-400 text-sm">–</span>
+        <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)}
+          className="px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+        {dateFilterActive && (
+          <button onClick={clearDates} className="flex items-center gap-1 text-xs text-gray-400 hover:text-red-500">
+            <X size={13} /> Clear
+          </button>
+        )}
+        {dateFilterActive && (
+          <span className="text-xs text-blue-600 ml-auto">
+            {filtered.length} service{filtered.length !== 1 ? 's' : ''} in range
+          </span>
+        )}
+      </div>
+
       {/* Table */}
       <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
         {isLoading ? (
@@ -170,18 +219,18 @@ export default function CustomersPage() {
           <table className="w-full text-sm">
             <thead className="bg-gray-50 border-b border-gray-200">
               <tr>
-                <th className="text-left px-4 py-3 font-medium text-gray-600">Customer</th>
-                <th className="text-left px-4 py-3 font-medium text-gray-600">Login</th>
+                <SortTh label="Customer" col="customer_name" sortKey={sortKey} sortDir={sortDir} onSort={toggleSort} />
+                <SortTh label="Login" col="service_login" sortKey={sortKey} sortDir={sortDir} onSort={toggleSort} />
                 <th className="text-left px-4 py-3 font-medium text-gray-600">SIM Number</th>
-                <th className="text-left px-4 py-3 font-medium text-gray-600">Status</th>
-                <th className="text-left px-4 py-3 font-medium text-gray-600">Last Seen</th>
+                <SortTh label="Status" col="status" sortKey={sortKey} sortDir={sortDir} onSort={toggleSort} />
+                <SortTh label="Last Seen" col="last_seen" sortKey={sortKey} sortDir={sortDir} onSort={toggleSort} />
                 <th className="text-left px-4 py-3 font-medium text-gray-600">IP</th>
-                <th className="text-left px-4 py-3 font-medium text-gray-600">↓ Peak DL</th>
-                <th className="text-left px-4 py-3 font-medium text-gray-600">↑ Peak UL</th>
+                <SortTh label="↓ Peak DL" col="download_bytes" sortKey={sortKey} sortDir={sortDir} onSort={toggleSort} />
+                <SortTh label="↑ Peak UL" col="upload_bytes" sortKey={sortKey} sortDir={sortDir} onSort={toggleSort} />
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {filtered.map(s => (
+              {sorted.map(s => (
                 <tr key={s.service_id} className="hover:bg-gray-50 transition-colors">
                   <td className="px-4 py-3">
                     <p className="font-medium text-gray-800 text-sm">{s.customer_name}</p>
@@ -239,6 +288,27 @@ function StatusBadge({ status }: { status: 'online' | 'active' | 'offline' }) {
       <span className="w-1.5 h-1.5 rounded-full bg-gray-400" />
       Offline
     </span>
+  );
+}
+
+function SortTh({ label, col, sortKey, sortDir, onSort }: {
+  label: string;
+  col: keyof ServiceRow;
+  sortKey: keyof ServiceRow | null;
+  sortDir: 'asc' | 'desc';
+  onSort: (col: keyof ServiceRow) => void;
+}) {
+  const active = sortKey === col;
+  return (
+    <th className="text-left px-4 py-3 font-medium text-gray-600">
+      <button onClick={() => onSort(col)}
+        className="flex items-center gap-1 hover:text-blue-600 transition-colors">
+        {label}
+        {active
+          ? sortDir === 'asc' ? <ArrowUp size={13} className="text-blue-600" /> : <ArrowDown size={13} className="text-blue-600" />
+          : <ArrowUpDown size={13} className="text-gray-300" />}
+      </button>
+    </th>
   );
 }
 

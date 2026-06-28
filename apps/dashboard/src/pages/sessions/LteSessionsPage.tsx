@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getActiveLteSims, getRecentLteSims, SimSession } from '../../api/sessions';
-import { Radio, RefreshCw, Download, Search, Wifi, WifiOff, Clock } from 'lucide-react';
+import { Radio, RefreshCw, Download, Search, Wifi, WifiOff, Clock, Filter } from 'lucide-react';
 import clsx from 'clsx';
 
 function formatBytes(bytes: number) {
@@ -21,11 +21,15 @@ function formatDuration(started: string) {
   return `${m}m`;
 }
 
-type Tab = 'live' | 'recent';
+type Tab = 'live' | 'recent' | 'filter';
 
 export default function LteSessionsPage() {
   const [search, setSearch] = useState('');
   const [tab, setTab] = useState<Tab>('live');
+  const [dlMin, setDlMin] = useState('');
+  const [dlMax, setDlMax] = useState('');
+  const [ulMin, setUlMin] = useState('');
+  const [ulMax, setUlMax] = useState('');
 
   const liveQuery = useQuery({
     queryKey: ['lte-sims'],
@@ -41,9 +45,19 @@ export default function LteSessionsPage() {
   });
 
   const { data, isLoading, isError, refetch, isFetching } =
-    tab === 'live' ? liveQuery : recentQuery;
+    tab === 'filter' ? liveQuery : tab === 'live' ? liveQuery : recentQuery;
 
+  const MB = 1024 * 1024;
   const filtered = (data?.sims ?? []).filter((s) => {
+    if (tab === 'filter') {
+      const dl = s.download_bytes;
+      const ul = s.upload_bytes;
+      if (dlMin !== '' && dl < parseFloat(dlMin) * MB) return false;
+      if (dlMax !== '' && dl > parseFloat(dlMax) * MB) return false;
+      if (ulMin !== '' && ul < parseFloat(ulMin) * MB) return false;
+      if (ulMax !== '' && ul > parseFloat(ulMax) * MB) return false;
+      return true;
+    }
     const q = search.toLowerCase();
     return (
       s.sim_number.toLowerCase().includes(q) ||
@@ -133,7 +147,78 @@ export default function LteSessionsPage() {
           <Clock size={15} />
           Last 24 Hours
         </button>
+        <button
+          onClick={() => setTab('filter')}
+          className={clsx(
+            'flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors',
+            tab === 'filter'
+              ? 'border-blue-600 text-blue-600'
+              : 'border-transparent text-gray-500 hover:text-gray-700'
+          )}
+        >
+          <Filter size={15} />
+          Usage Filter
+        </button>
       </div>
+
+      {/* Usage Filter controls */}
+      {tab === 'filter' && (
+        <div className="bg-white border border-gray-200 rounded-xl p-4 mb-6">
+          <p className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-3">Filter by usage (MB)</p>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <p className="text-xs text-green-700 font-medium mb-1.5">↓ Download (MB)</p>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min="0"
+                  placeholder="Min"
+                  value={dlMin}
+                  onChange={(e) => setDlMin(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-green-400"
+                />
+                <span className="text-gray-400 text-sm">–</span>
+                <input
+                  type="number"
+                  min="0"
+                  placeholder="Max"
+                  value={dlMax}
+                  onChange={(e) => setDlMax(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-green-400"
+                />
+              </div>
+            </div>
+            <div>
+              <p className="text-xs text-blue-700 font-medium mb-1.5">↑ Upload (MB)</p>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min="0"
+                  placeholder="Min"
+                  value={ulMin}
+                  onChange={(e) => setUlMin(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
+                />
+                <span className="text-gray-400 text-sm">–</span>
+                <input
+                  type="number"
+                  min="0"
+                  placeholder="Max"
+                  value={ulMax}
+                  onChange={(e) => setUlMax(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
+                />
+              </div>
+            </div>
+          </div>
+          <button
+            onClick={() => { setDlMin(''); setDlMax(''); setUlMin(''); setUlMax(''); }}
+            className="mt-3 text-xs text-gray-400 hover:text-gray-600"
+          >
+            Clear filters
+          </button>
+        </div>
+      )}
 
       {/* Stats */}
       <div className="grid grid-cols-3 gap-4 mb-6">
@@ -166,16 +251,18 @@ export default function LteSessionsPage() {
       </div>
 
       {/* Search */}
-      <div className="relative mb-4">
-        <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={16} />
-        <input
-          type="text"
-          placeholder="Search by SIM number, customer name, or IP…"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          className="w-full pl-9 pr-4 py-2.5 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-        />
-      </div>
+      {tab !== 'filter' && (
+        <div className="relative mb-4">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={16} />
+          <input
+            type="text"
+            placeholder="Search by SIM number, customer name, or IP…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="w-full pl-9 pr-4 py-2.5 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+        </div>
+      )}
 
       {/* Table */}
       <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
