@@ -5,6 +5,12 @@
  * POS activation ping) and flips a customer's internet service between a
  * Zero-Rated Base tariff (IDLE) and a Speed-Tiered Unlimited tariff (ACTIVE).
  *
+ * On an ACTIVE activation it also creates a Splynx finance record (transaction,
+ * optionally a payment) so every data-burning window has a matching revenue line
+ * and collections reconcile against bundle burn. Billing is gated behind
+ * PPU_BILLING_ENABLED and is best-effort: a billing failure is logged and
+ * surfaced but never rolls back or blocks the tariff switch.
+ *
  * Uses the same proven Splynx paths as the rest of this server:
  *   - service update: PUT /admin/customers/customer/{id}/internet-services--{sid}
  *   - live apply:     DELETE /admin/customers/customers-online/{sessionId}
@@ -14,12 +20,15 @@
  * inbound webhook (raw body), since this endpoint is triggered by 3rd parties.
  *
  * Env:
- *   WEBHOOK_SECRET            HMAC secret shared with the webhook sender (required)
- *   PPU_PLAN_IDLE_ID          Splynx tariff_id for Zero-Rated Base
- *   PPU_PLAN_ACTIVE_ID        Splynx tariff_id for Speed-Tiered Unlimited
- *   PPU_DISCONNECT_ON_SWITCH  'true' (default) to disconnect the live session so
- *                             it re-auths onto the new tariff; 'false' to rely on
- *                             Splynx auto-CoA only.
+ *   WEBHOOK_SECRET             HMAC secret shared with the webhook sender (required)
+ *   PPU_PLAN_IDLE_ID           Splynx tariff_id for Zero-Rated Base
+ *   PPU_PLAN_ACTIVE_ID         Splynx tariff_id for Speed-Tiered Unlimited
+ *   PPU_DISCONNECT_ON_SWITCH   'true' (default) to disconnect the live session so
+ *                              it re-auths onto the new tariff; 'false' to rely on
+ *                              Splynx auto-CoA only.
+ *   PPU_BILLING_ENABLED        'true' to write Splynx finance records on ACTIVE. Default false.
+ *   PPU_TRANSACTION_CATEGORY_ID Splynx finance transaction category id for PPU passes.
+ *   PPU_VAT_RATE               VAT fraction for inclusive->net split. Default 0.18 (Uganda 18%).
  */
 
 import { Router, Request, Response } from 'express';
@@ -33,6 +42,23 @@ const PLAN_MAPPING: Record<string, number> = {
   ACTIVE: Number(process.env.PPU_PLAN_ACTIVE_ID || 0),
 };
 const DISCONNECT_ON_SWITCH = (process.env.PPU_DISCONNECT_ON_SWITCH ?? 'true') !== 'false';
+
+// ─── Billing config ──────────────────────────────────────────────────────────
+const BILLING_ENABLED = process.env.PPU_BILLING_ENABLED === 'true';
+const TX_CATEGORY_ID = Number(process.env.PPU_TRANSACTION_CATEGORY_ID || 0);
+const VAT_RATE = Number(process.env.PPU_VAT_RATE || '0.18');
+
+// Canonical customer-facing ladder (UGX, VAT-inclusive). Keep in sync with
+// mtn_project_context.md. The webhook may pass an explicit `amount` to override.
+const BUNDLE_PRICING: Record<string, number> = {
+  light_day: 3_500,
+  day: 5_000,
+  weekend: 12_000,
+  '3day': 13_000,
+  week: 30_000,
+  '2week': 55_000,
+  month: 90_000,
+};
 
 // ─── Verify the inbound webhook HMAC over the RAW body ───────────────────────
 function signatureValid(req: Request): boolean {
@@ -75,8 +101,76 @@ async function disconnectLiveSession(serviceId: number, login?: string) {
   return disconnected;
 }
 
+// ─── Resolve the gross (VAT-inclusive) charge for an ACTIVE window ────────────
+function resolveAmount(bundle?: string, amount?: number): number | null {
+  if (typeof amount === 'number' && amount > 0) return amount;
+  if (bundle && BUNDLE_PRICING[bundle] != null) return BUNDLE_PRICING[bundle];
+  return null;
+}
+
+// ─── Create a Splynx finance record for a PPU pass (best-effort) ─────────────
+// Records the bundle charge as a transaction so revenue reconciles against the
+// data the ACTIVE window will burn. Optionally records the MoMo payment too.
+//
+// NOTE: Splynx finance field names vary by release (we run v2.0). Verify
+// `category_id`, `price`, `tax_percent`, and the payment fields against your
+// instance's API docs before relying on this in production.
+async function createBillingRecord(opts: {
+  customerId: number | string;
+  serviceId: number;
+  gross: number;
+  bundle?: string;
+  paymentRef?: string;
+  recordPayment?: boolean;
+}): Promise<{ ok: boolean; transaction_id?: number; payment_id?: number; error?: string }> {
+  const { customerId, serviceId, gross, bundle, paymentRef, recordPayment } = opts;
+  if (!TX_CATEGORY_ID) {
+    return { ok: false, error: 'PPU_TRANSACTION_CATEGORY_ID not configured' };
+  }
+  // Published prices are VAT-inclusive; split into net + tax for clean reporting.
+  const net = Math.round(gross / (1 + VAT_RATE));
+  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  const label = bundle ? `PPU ${bundle} pass` : 'PPU activation';
+
+  try {
+    const tx: any = await splynx('post', '/admin/finance/transactions', {
+      customer_id: Number(customerId),
+      category_id: TX_CATEGORY_ID,
+      service_id: serviceId,
+      description: `${label} (service ${serviceId})`,
+      quantity: 1,
+      price: net,                       // net unit price
+      tax_percent: Math.round(VAT_RATE * 100),
+      date: today,
+    });
+    const transactionId = tx?.id || tx?.transaction_id;
+
+    let paymentId: number | undefined;
+    if (recordPayment) {
+      const pay: any = await splynx('post', '/admin/finance/payments', {
+        customer_id: Number(customerId),
+        amount: gross,                  // gross collected via MoMo
+        date: today,
+        comment: paymentRef ? `MoMo ${paymentRef}` : `PPU ${label}`,
+      });
+      paymentId = pay?.id || pay?.payment_id;
+    }
+
+    return { ok: true, transaction_id: transactionId, payment_id: paymentId };
+  } catch (err: any) {
+    return { ok: false, error: err.response?.data ? JSON.stringify(err.response.data) : err.message };
+  }
+}
+
 // ─── POST /api/ppu/trigger ───────────────────────────────────────────────────
-// Body: { customer_id: number, target_tier: 'ACTIVE' | 'IDLE' }
+// Body: {
+//   customer_id: number,
+//   target_tier: 'ACTIVE' | 'IDLE',
+//   bundle?: string,         // e.g. 'weekend' (drives the charge amount on ACTIVE)
+//   amount?: number,         // explicit gross UGX, overrides bundle lookup
+//   payment_ref?: string,    // MoMo reference for reconciliation
+//   record_payment?: boolean // also POST a Splynx payment (default false)
+// }
 router.post('/trigger', async (req: Request, res: Response) => {
   // 1. Security guardrail
   if (!signatureValid(req)) {
@@ -86,7 +180,7 @@ router.post('/trigger', async (req: Request, res: Response) => {
   }
 
   // 2. Validate payload
-  const { customer_id, target_tier } = req.body || {};
+  const { customer_id, target_tier, bundle, amount, payment_ref, record_payment } = req.body || {};
   const targetTariffId = PLAN_MAPPING[String(target_tier)];
   if (!customer_id || !targetTariffId) {
     res.status(400).json({ error: 'Missing customer_id or invalid target_tier (expected ACTIVE|IDLE, with plan IDs configured)' });
@@ -123,6 +217,31 @@ router.post('/trigger', async (req: Request, res: Response) => {
       disconnected = await disconnectLiveSession(Number(service.id), service.login);
     }
 
+    // 7. Billing: an ACTIVE window costs us MTN data -> record the revenue line.
+    //    Best-effort: never roll back / block the switch on a billing failure.
+    let billing: any = { skipped: true };
+    if (String(target_tier) === 'ACTIVE' && BILLING_ENABLED) {
+      const gross = resolveAmount(bundle, amount);
+      if (gross == null) {
+        billing = { ok: false, error: 'no bundle/amount provided; cannot create revenue line' };
+        console.error(`[ppu] BILLING GAP: ACTIVE switch for customer ${customer_id} with no amount — data will burn with no revenue line`);
+      } else {
+        billing = await createBillingRecord({
+          customerId: customer_id,
+          serviceId: Number(service.id),
+          gross,
+          bundle,
+          paymentRef: payment_ref,
+          recordPayment: record_payment === true,
+        });
+        if (!billing.ok) {
+          console.error(`[ppu] BILLING FAILED for customer ${customer_id} (${gross} UGX): ${billing.error}`);
+        } else {
+          console.log(`[ppu] billed customer ${customer_id} ${gross} UGX (tx ${billing.transaction_id})`);
+        }
+      }
+    }
+
     console.log(`[ppu] customer ${customer_id} -> ${target_tier}; sessions cycled: ${disconnected}`);
     res.json({
       success: true,
@@ -131,6 +250,7 @@ router.post('/trigger', async (req: Request, res: Response) => {
       target_tier,
       tariff_id: targetTariffId,
       sessions_cycled: disconnected,
+      billing,
       message: `Migrated customer ${customer_id} to ${target_tier}.`,
     });
   } catch (err: any) {
