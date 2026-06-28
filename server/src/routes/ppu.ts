@@ -34,6 +34,7 @@
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
 import { splynx } from '../lib/splynx';
+import { enqueueBillingIntent } from '../services/billingRetry';
 
 const router = Router();
 
@@ -236,6 +237,17 @@ router.post('/trigger', async (req: Request, res: Response) => {
         });
         if (!billing.ok) {
           console.error(`[ppu] BILLING FAILED for customer ${customer_id} (${gross} UGX): ${billing.error}`);
+          // Durably queue for retry so the revenue line is not lost.
+          enqueueBillingIntent({
+            id: crypto.randomUUID(),
+            customer_id: Number(customer_id),
+            service_id: Number(service.id),
+            gross,
+            bundle,
+            payment_ref,
+            record_payment: record_payment === true,
+          });
+          billing.queued = true;
         } else {
           console.log(`[ppu] billed customer ${customer_id} ${gross} UGX (tx ${billing.transaction_id})`);
         }

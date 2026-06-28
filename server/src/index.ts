@@ -11,6 +11,7 @@ import importRouter from './routes/import';
 import ppuRouter from './routes/ppu';
 import { startAccountingMonitor, getLastHealthResult } from './services/accountingMonitor';
 import { startSimPoller } from './services/simPoller';
+import { startBillingRetry, getBillingQueueStatus } from './services/billingRetry';
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -37,6 +38,7 @@ app.get('/', (_req, res) => res.json({
     'GET  /api/health',
     'GET  /api/health/accounting',
     'POST /api/health/accounting/test-sms',
+    'GET  /api/health/billing-queue',
     'GET  /api/sessions/online',
     'GET  /api/sessions/online/lte-sims',
     'POST /api/sessions/disconnect',
@@ -61,6 +63,7 @@ app.get('/', (_req, res) => res.json({
 
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
 app.get('/api/health/accounting', (_req, res) => res.json(getLastHealthResult()));
+app.get('/api/health/billing-queue', (_req, res) => res.json(getBillingQueueStatus()));
 
 // POST /api/health/accounting/test-sms — sends a test alert SMS immediately
 app.post('/api/health/accounting/test-sms', async (_req, res) => {
@@ -104,4 +107,5 @@ app.listen(PORT, () => {
   console.log(`Splynx API server running on http://localhost:${PORT}`);
   startAccountingMonitor();
   startSimPoller();
+  startBillingRetry();
 });
