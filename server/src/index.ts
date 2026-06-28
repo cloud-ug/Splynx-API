@@ -2,10 +2,13 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
+import path from 'path';
+import fs from 'fs';
 
 import sessionsRouter from './routes/sessions';
 import customersRouter from './routes/customers';
 import importRouter from './routes/import';
+import ppuRouter from './routes/ppu';
 import { startAccountingMonitor, getLastHealthResult } from './services/accountingMonitor';
 import { startSimPoller } from './services/simPoller';
 
@@ -13,12 +16,20 @@ const app = express();
 const PORT = process.env.PORT || 4000;
 
 app.use(cors({ origin: process.env.DASHBOARD_URL || 'http://localhost:5173' }));
-app.use(express.json());
+// Capture the raw body so the PPU webhook can verify its HMAC signature.
+app.use(express.json({ verify: (req, _res, buf) => { (req as any).rawBody = buf; } }));
 app.use(rateLimit({ windowMs: 60_000, max: 120 }));
+
+// Serve dashboard static build (must be before API routes so / serves index.html)
+const dashboardDist = path.resolve(process.cwd(), 'apps/dashboard/dist');
+if (fs.existsSync(dashboardDist)) {
+  app.use(express.static(dashboardDist));
+}
 
 app.use('/api/sessions', sessionsRouter);
 app.use('/api/customers', customersRouter);
 app.use('/api/import', importRouter);
+app.use('/api/ppu', ppuRouter);
 
 app.get('/', (_req, res) => res.json({
   name: 'Splynx API Wrapper',
@@ -39,6 +50,7 @@ app.get('/', (_req, res) => res.json({
     'GET  /api/customers/:id',
     'GET  /api/customers/:id/services',
     'GET  /api/customers/:id/invoices',
+    'POST /api/ppu/trigger',
     'PUT  /api/customers/:id/services/:serviceId',
     'DELETE /api/customers/:id/services/:serviceId',
     'POST /api/import/rebuild-sims',
@@ -83,79 +95,10 @@ app.post('/api/health/accounting/test-sms', async (_req, res) => {
   }
 });
 
-// Temporary debug endpoint — remove after auth is working
-app.get('/api/debug/auth', async (_req, res) => {
-  const axios = require('axios');
-  const crypto = require('crypto');
-  const url = process.env.SPLYNX_URL;
-  const apiKey = process.env.SPLYNX_API_KEY;
-  const apiSecret = process.env.SPLYNX_API_SECRET;
-  const login = process.env.SPLYNX_LOGIN;
-  const password = process.env.SPLYNX_PASSWORD;
-
-  const results: any[] = [];
-  const nonce = Math.floor(Date.now() / 1000).toString();
-  const sig = crypto.createHmac('sha256', apiSecret).update(nonce + apiKey).digest('hex').toUpperCase();
-
-  const withOrigin = {
-    'Content-Type': 'application/json',
-    'Accept': 'application/json',
-    'Origin': url,
-    'Referer': `${url}/`,
-  };
-  const withoutOrigin = {
-    'Content-Type': 'application/json',
-    'Accept': 'application/json',
-  };
-
-  const post = async (label: string, path: string, body: any, headers = withOrigin) => {
-    try {
-      const r = await axios.post(`${url}${path}`, body, { headers });
-      results.push({ label, success: true, status: r.status, data: r.data });
-    } catch (err: any) {
-      results.push({ label, success: false, status: err.response?.status, data: err.response?.data });
-    }
-  };
-
-  const basicAuth = Buffer.from(`${login}:${password}`).toString('base64');
-  const basicHeaders = { Authorization: `Basic ${basicAuth}`, Accept: 'application/json' };
-  const apiKeyHeaders = { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' };
-
-  const get = async (label: string, path: string, headers?: any, params?: any) => {
-    try {
-      const r = await axios.get(`${url}${path}`, { headers: headers || withOrigin, params });
-      results.push({ label, success: true, status: r.status, data: r.data });
-    } catch (err: any) {
-      results.push({ label, success: false, status: err.response?.status, data: err.response?.data });
-    }
-  };
-
-  // Basic Auth attempts
-  await get('GET /api Basic Auth', '/api', basicHeaders);
-  await get('GET /api Bearer apiKey', '/api', apiKeyHeaders);
-
-  // Try Splynx swagger/docs endpoints
-  await get('GET /api/docs', '/api/docs');
-  await get('GET /swagger', '/swagger');
-  await get('GET /api/v2/swagger', '/api/v2/swagger');
-
-  // POST /api with credentials in body
-  await post('POST /api admin login', '/api', { auth_type: 'admin', login, password });
-  await post('POST /api api_key HMAC', '/api', { auth_type: 'api_key', key: apiKey, nonce, signature: sig });
-
-  // Try /api/v2/auth/tokens with Basic Auth header
-  try {
-    const r = await axios.post(`${url}/api/v2/auth/tokens`,
-      { auth_type: 'admin', login, password },
-      { headers: { ...basicHeaders, 'Content-Type': 'application/json' } }
-    );
-    results.push({ label: 'POST /api/v2/auth/tokens + Basic header', success: true, data: r.data });
-  } catch (err: any) {
-    results.push({ label: 'POST /api/v2/auth/tokens + Basic header', success: false, status: err.response?.status, data: err.response?.data });
-  }
-
-  res.json(results);
-});
+// SPA fallback — must be after all API routes
+if (fs.existsSync(dashboardDist)) {
+  app.get('*', (_req, res) => res.sendFile(path.join(dashboardDist, 'index.html')));
+}
 
 app.listen(PORT, () => {
   console.log(`Splynx API server running on http://localhost:${PORT}`);
