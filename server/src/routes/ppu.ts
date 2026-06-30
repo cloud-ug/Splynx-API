@@ -40,7 +40,15 @@ const router = Router();
 
 const PLAN_MAPPING: Record<string, number> = {
   IDLE: Number(process.env.PPU_PLAN_IDLE_ID || 0),
-  ACTIVE: Number(process.env.PPU_PLAN_ACTIVE_ID || 0),
+  // Back-compat: bare ACTIVE falls back to Max (50M) or the legacy single ACTIVE id.
+  ACTIVE: Number(process.env.PPU_PLAN_ACTIVE_ID || process.env.PPU_PLAN_ACTIVE_MAX_ID || 0),
+  // Density-first speed tiers (single IDLE for all). IDs wired in .env once the tariffs exist.
+  'ACTIVE-Nano': Number(process.env.PPU_PLAN_ACTIVE_NANO_ID || 0),
+  'ACTIVE-UltraLite': Number(process.env.PPU_PLAN_ACTIVE_ULTRALITE_ID || 0),
+  'ACTIVE-Lite': Number(process.env.PPU_PLAN_ACTIVE_LITE_ID || 0),
+  'ACTIVE-Standard': Number(process.env.PPU_PLAN_ACTIVE_STANDARD_ID || 0),
+  'ACTIVE-Max': Number(process.env.PPU_PLAN_ACTIVE_MAX_ID || 0),
+  'ACTIVE-Pro': Number(process.env.PPU_PLAN_ACTIVE_PRO_ID || 0),
 };
 const DISCONNECT_ON_SWITCH = (process.env.PPU_DISCONNECT_ON_SWITCH ?? 'true') !== 'false';
 
@@ -183,10 +191,16 @@ router.post('/trigger', async (req: Request, res: Response) => {
   }
 
   // 2. Validate payload
-  const { customer_id, target_tier, bundle, amount, payment_ref, record_payment } = req.body || {};
-  const targetTariffId = PLAN_MAPPING[String(target_tier)];
+  const { customer_id, target_tier, speed_tier, bundle, amount, payment_ref, record_payment } = req.body || {};
+  const rawTier = String(target_tier || '');
+  const isActive = rawTier === 'ACTIVE' || rawTier.startsWith('ACTIVE-');
+  // Resolve the speed-tier key: explicit 'ACTIVE-<Tier>', or 'ACTIVE' + speed_tier, else raw (IDLE).
+  const tierKey = rawTier.startsWith('ACTIVE-')
+    ? rawTier
+    : (isActive && speed_tier ? `ACTIVE-${speed_tier}` : rawTier);
+  const targetTariffId = PLAN_MAPPING[tierKey] || PLAN_MAPPING[rawTier];
   if (!customer_id || !targetTariffId) {
-    res.status(400).json({ error: 'Missing customer_id or invalid target_tier (expected ACTIVE|IDLE, with plan IDs configured)' });
+    res.status(400).json({ error: 'Missing customer_id or invalid target_tier (IDLE | ACTIVE[-Nano|UltraLite|Lite|Standard|Max|Pro], with plan IDs configured)' });
     return;
   }
 
@@ -223,7 +237,7 @@ router.post('/trigger', async (req: Request, res: Response) => {
     // 7. Billing: an ACTIVE window costs us MTN data -> record the revenue line.
     //    Best-effort: never roll back / block the switch on a billing failure.
     let billing: any = { skipped: true };
-    if (String(target_tier) === 'ACTIVE' && BILLING_ENABLED) {
+    if (isActive && BILLING_ENABLED) {
       const gross = resolveAmount(bundle, amount);
       if (gross == null) {
         billing = { ok: false, error: 'no bundle/amount provided; cannot create revenue line' };
