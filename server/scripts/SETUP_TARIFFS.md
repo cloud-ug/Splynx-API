@@ -1,8 +1,12 @@
 # PPU Tariff Setup — Splynx
 
-The PPU webhook flips a service between two internet tariffs. They don't exist yet
-(the instance currently has only flat LTE tariffs 37 / 71). Create both, then put
-their IDs in `server/.env` as `PPU_PLAN_IDLE_ID` and `PPU_PLAN_ACTIVE_ID`.
+The PPU webhook flips a service between internet tariffs. Sections 1–2 below cover the
+original **two-tariff** model (IDLE + a single 50M ACTIVE). This has since been
+**expanded to 6 base-speed ACTIVE tiers** — see **§5** and the per-tier FUP runbook.
+
+> **Status (2026-06-30):** the tariffs are **created and live** — IDLE **83**, and ACTIVE
+> **Nano 85 / Ultra-Lite 86 / Lite 87 / Standard 88 / Max 84 / Pro 89**. IDs are wired in
+> `server/.env`. §1–2 remain as the conceptual baseline; §5 is the current shape.
 
 Path in Splynx: **Tariff Plans → Internet → Add**.
 
@@ -66,3 +70,20 @@ or read them from the Splynx tariff list URL.
   tariff_id changes and the live session re-shapes.
 - Run `scripts/validate-coa.sh` to decide `PPU_DISCONNECT_ON_SWITCH`.
 - Run `scripts/verify-finance-fields.ts` before enabling `PPU_BILLING_ENABLED`.
+
+## 5. Speed tiers + per-tier FUP (current model)
+The single ACTIVE tariff is now **6 base-speed tiers** (single IDLE 83 for all):
+
+| Tier | Tariff ID | Speed | env |
+|---|---|---|---|
+| Nano | 85 | 2M | `PPU_PLAN_ACTIVE_NANO_ID` |
+| Ultra-Lite | 86 | 5M | `PPU_PLAN_ACTIVE_ULTRALITE_ID` |
+| Lite | 87 | 10M | `PPU_PLAN_ACTIVE_LITE_ID` |
+| Standard | 88 | 25M | `PPU_PLAN_ACTIVE_STANDARD_ID` |
+| Max | 84 | 50M | `PPU_PLAN_ACTIVE_MAX_ID` |
+| Pro | 89 | 100M | `PPU_PLAN_ACTIVE_PRO_ID` |
+
+- `ppu.ts` resolves a tier via `target_tier:'ACTIVE-<Tier>'` or `target_tier:'ACTIVE' + speed_tier`.
+- **Per-tier FUP setup (Splynx UI):** step-by-step per-tariff thresholds + reduce-to speeds in
+  **`Cloud-Bulk-Data/docs/fup_setup_ui_steps.md`** (also **update tariff 84** from the old
+  15 GB→10M to 11.5 GB→20M). Build spec: `Cloud-Bulk-Data/docs/bandwidth_tiers_tech.md`.
